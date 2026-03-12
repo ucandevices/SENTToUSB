@@ -1,0 +1,7 @@
+../Core/Src/sent_app.c:85:13:tx_enqueue_cstr.part.0	32	static
+../Core/Src/sent_app.c:166:6:SentApp_Init	40	static
+../Core/Src/sent_app.c:192:6:SentApp_Process	112	static
+../Core/Src/sent_app.c:198:6:SentApp_OnUsbRx	32	static,ignoring_inline_asm
+../Core/Src/sent_app.c:211:6:SentApp_OnSentRxCaptureEdge	8	static
+../Core/Src/sent_app.c:215:6:SentApp_OnSentRxTimerOverflow	8	static
+../Core/Src/sent_app.c:219:9:SentApp_PopNextTxIntervalTicks	8	static

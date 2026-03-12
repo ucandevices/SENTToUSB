@@ -1,0 +1,4 @@
+../Core/Src/sent/mode_manager.c:8:6:sent_mode_manager_init	16	static,ignoring_inline_asm
+../Core/Src/sent/mode_manager.c:16:6:sent_mode_manager_start_rx	16	static,ignoring_inline_asm
+../Core/Src/sent/mode_manager.c:23:6:sent_mode_manager_start_tx	16	static,ignoring_inline_asm
+../Core/Src/sent/mode_manager.c:30:6:sent_mode_manager_stop	16	static,ignoring_inline_asm

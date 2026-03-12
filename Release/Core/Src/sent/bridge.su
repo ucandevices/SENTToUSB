@@ -1,0 +1,5 @@
+../Core/Src/sent/bridge.c:13:13:response_push.isra	16	static,ignoring_inline_asm
+../Core/Src/sent/bridge.c:84:6:sent_bridge_init	32	static,ignoring_inline_asm
+../Core/Src/sent/bridge.c:110:6:sent_bridge_on_slcan_line	64	static,ignoring_inline_asm
+../Core/Src/sent/bridge.c:207:6:sent_bridge_on_sent_timestamps_us	64	static,ignoring_inline_asm
+../Core/Src/sent/bridge.c:255:6:sent_bridge_poll_rx_hal	72	static,ignoring_inline_asm

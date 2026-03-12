@@ -1,0 +1,6 @@
+../Core/Src/sent/slcan.c:9:15:trim_len	5
+../Core/Src/sent/slcan.c:25:13:parse_hex_slice	12
+../Core/Src/sent/slcan.c:58:13:nibble_to_hex	2
+../Core/Src/sent/slcan.c:71:13:append_hex	2
+../Core/Src/sent/slcan.c:83:6:sent_slcan_parse_line	22
+../Core/Src/sent/slcan.c:166:6:sent_slcan_serialize_frame	10

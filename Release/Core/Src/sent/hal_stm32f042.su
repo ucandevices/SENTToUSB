@@ -1,0 +1,15 @@
+../Core/Src/sent/hal_stm32f042.c:75:13:stm32_rx_start	8	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:117:13:stm32_rx_stop	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:272:13:stm32_tx_stop	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:128:13:stm32_rx_poll	32	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:253:13:stm32_tx_start	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:284:13:stm32_tx_submit	64	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:164:6:sent_stm32f042_rx_hal_init	16	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:182:6:sent_stm32f042_make_rx_hal	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:194:6:sent_stm32f042_rx_on_capture_edge_isr	24	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:223:6:sent_stm32f042_rx_on_overflow_isr	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:234:10:sent_stm32f042_rx_dropped_batches	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:328:6:sent_stm32f042_tx_hal_init	16	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:344:6:sent_stm32f042_make_tx_hal	0	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:357:6:sent_stm32f042_tx_pop_next_interval_ticks_from_isr	40	static,ignoring_inline_asm
+../Core/Src/sent/hal_stm32f042.c:402:8:sent_stm32f042_tx_pending_frames	8	static,ignoring_inline_asm

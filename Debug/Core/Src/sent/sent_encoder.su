@@ -1,0 +1,2 @@
+../Core/Src/sent/sent_encoder.c:14:6:sent_build_intervals_ticks	48	static,ignoring_inline_asm
+../Core/Src/sent/sent_encoder.c:71:6:sent_intervals_to_timestamps_us	48	static,ignoring_inline_asm
