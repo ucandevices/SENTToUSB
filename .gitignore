@@ -1,0 +1,35 @@
+# ── Compiled objects ─────────────────────────────────────────────────────────
+**/*.o
+**/*.d
+**/*.su
+**/*.cyclo
+
+# ── Linker / build outputs ───────────────────────────────────────────────────
+Debug/*.elf
+Debug/*.bin
+Debug/*.map
+Debug/*.list
+Debug/default.size.stdout
+Release/*.elf
+Release/*.bin
+Release/*.map
+Release/*.list
+Release/default.size.stdout
+
+# ── IDE / Eclipse settings (machine-specific paths) ──────────────────────────
+# .cproject / .project / .mxproject / SENTToUSB.ioc are tracked (needed for import)
+.settings/
+*.launch
+
+# ── Python cache ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Windows ──────────────────────────────────────────────────────────────────
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ── Large binary datasheets (optional — remove these lines to track PDFs) ────
+*.pdf

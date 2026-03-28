@@ -1,4 +1,0 @@
-../Core/Src/sent/mode_manager.c:8:6:sent_mode_manager_init	2
-../Core/Src/sent/mode_manager.c:16:6:sent_mode_manager_start_rx	2
-../Core/Src/sent/mode_manager.c:23:6:sent_mode_manager_start_tx	2
-../Core/Src/sent/mode_manager.c:30:6:sent_mode_manager_stop	2

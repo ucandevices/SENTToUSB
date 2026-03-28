@@ -10,7 +10,7 @@ uint8_t sent_crc4_j2716(const uint8_t* data_nibbles,
                         size_t nibble_count,
                         sent_crc_mode_t mode,
                         uint8_t status_nibble) {
-    uint8_t crc = 0x05U;
+    uint8_t crc = 0x03U;  /* SAE J2716 APR2016 recommended seed (= 0x05 after implicit 0x00 padding nibble) */
 
     if (mode == SENT_CRC_MODE_STATUS_AND_DATA) {
         uint8_t nibble = (uint8_t)(status_nibble & 0x0FU);

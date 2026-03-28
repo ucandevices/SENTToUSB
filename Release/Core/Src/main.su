@@ -1,5 +1,0 @@
-../Core/Src/main.c:125:6:SystemClock_Config	104	static,ignoring_inline_asm
-../Core/Src/main.c:70:5:main	80	static,ignoring_inline_asm
-../Core/Src/main.c:285:6:HAL_TIM_IC_CaptureCallback	8	static
-../Core/Src/main.c:294:6:HAL_TIM_PeriodElapsedCallback	24	static
-../Core/Src/main.c:322:6:Error_Handler	0	static,ignoring_inline_asm

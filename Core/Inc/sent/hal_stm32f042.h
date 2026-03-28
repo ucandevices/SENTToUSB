@@ -19,8 +19,16 @@ extern "C" {
 typedef struct {
     uint32_t timer_clock_hz;
     uint16_t timer_autoreload;
-    uint8_t capture_batch_size;    /* max SENT_STM32F042_RX_MAX_BATCH_SIZE (24) */
-    uint8_t ready_queue_depth;     /* max SENT_STM32F042_RX_MAX_READY_BATCHES (4) */
+    uint8_t capture_batch_size;    /* max SENT_STM32F042_RX_MAX_BATCH_SIZE (13) */
+    uint8_t ready_queue_depth;     /* max SENT_STM32F042_RX_MAX_READY_BATCHES (2) */
+    /* Sync-detection threshold [µs].  When a captured interval is >= this value
+     * and active_count > 0, the current partial batch is discarded and a fresh
+     * batch is started with the preceding edge (the sync falling-edge) as
+     * timestamp[0].  Set to 0 to disable.
+     * For MLX90377 at 3 µs tick: sync = 168 µs, max nibble = 81 µs → use 100 µs.
+     * If two consecutive long intervals occur (long pause then sync), the second
+     * long interval re-fires and corrects the alignment automatically. */
+    uint32_t sync_min_us;
 } sent_stm32f042_rx_config_t;
 
 typedef struct {

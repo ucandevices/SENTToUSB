@@ -1,2 +1,0 @@
-../Core/Src/sent/sent_encoder.c:14:6:sent_build_intervals_ticks	15
-../Core/Src/sent/sent_encoder.c:71:6:sent_intervals_to_timestamps_us	9

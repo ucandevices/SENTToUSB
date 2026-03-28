@@ -1,4 +1,0 @@
-../Core/Src/sent/sent_protocol.c:8:15:sent_default_config	24	static
-../Core/Src/sent/sent_protocol.c:22:6:sent_validate_config	16	static,ignoring_inline_asm
-../Core/Src/sent/sent_protocol.c:39:10:sent_pack_nibbles	40	static,ignoring_inline_asm
-../Core/Src/sent/sent_protocol.c:71:6:sent_unpack_nibbles	32	static,ignoring_inline_asm

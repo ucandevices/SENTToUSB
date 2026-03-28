@@ -189,6 +189,16 @@ void sent_stm32f042_make_rx_hal(sent_stm32f042_rx_hal_t* impl, sent_rx_hal_t* ou
 }
 
 /* ISR handler: process a captured falling-edge counter value, convert to timestamp.
+ *
+ * Sync detection (when config.sync_min_us > 0):
+ *   A SENT sync pulse (56 ticks) is much longer than any data nibble (12-27 ticks).
+ *   When the interval from the previous edge to this edge is >= sync_min_us AND there
+ *   are already edges in the active batch, the previous edge was the sync falling-edge.
+ *   We discard the partial batch and restart it with that sync edge as timestamp[0].
+ *
+ *   If two consecutive long intervals arrive (long pause then sync), the second
+ *   long interval re-fires sync detection and corrects the alignment automatically.
+ *
  * @param hal               RX HAL instance
  * @param captured_counter  raw 16-bit timer capture register value [timer ticks] */
 void sent_stm32f042_rx_on_capture_edge_isr(sent_stm32f042_rx_hal_t* hal,
@@ -206,7 +216,19 @@ void sent_stm32f042_rx_on_capture_edge_isr(sent_stm32f042_rx_hal_t* hal,
 
     uint32_t delta_ticks = counter_ticks - hal->last_counter_ticks;
     hal->last_counter_ticks = counter_ticks;
+
+    uint32_t prev_timestamp_us = hal->last_timestamp_us;
     hal->last_timestamp_us += rx_ticks_to_us_no_div(hal, delta_ticks);
+
+    /* Sync detection: long interval => previous edge was the sync start.
+     * Reset the batch and seed it with that sync edge (prev_timestamp_us). */
+    if (hal->config.sync_min_us > 0U &&
+        hal->active_count > 0U &&
+        (hal->last_timestamp_us - prev_timestamp_us) >= hal->config.sync_min_us) {
+        hal->active_count = 0U;
+        hal->active_timestamps_us[0] = prev_timestamp_us;
+        hal->active_count = 1U;
+    }
 
     if (hal->active_count < hal->config.capture_batch_size &&
         hal->active_count < SENT_STM32F042_RX_MAX_BATCH_SIZE) {

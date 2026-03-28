@@ -1,4 +1,0 @@
-../Core/Src/sent/slcan.c:71:13:append_hex	20	static
-../Core/Src/sent/slcan.c:25:13:parse_hex_slice.constprop	16	static,ignoring_inline_asm
-../Core/Src/sent/slcan.c:83:6:sent_slcan_parse_line	72	static,ignoring_inline_asm
-../Core/Src/sent/slcan.c:166:6:sent_slcan_serialize_frame	24	static,ignoring_inline_asm

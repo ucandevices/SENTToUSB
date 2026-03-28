@@ -71,7 +71,12 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /* Disable USB IRQ immediately: DFU bootloader leaves it enabled.
+   * If a USB reset fires before HAL_PCD_Init sets Init.speed, the
+   * PCD_ResetCallback sees speed==0 and calls Error_Handler. */
+  NVIC->ICER[0] = (1U << 31U);   /* IRQ31 = USB */
+  __DSB();
+  __ISB();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -207,7 +212,7 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
   sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
   sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
   sConfigIC.ICFilter = 0;
@@ -237,11 +242,15 @@ static void MX_TIM14_Init(void)
 
   /* USER CODE END TIM14_Init 1 */
   htim14.Instance = TIM14;
-  htim14.Init.Prescaler = 0;
+  /* Prescaler 143: 48 MHz / 144 = 333.33 kHz → 1 TIM14 tick = 3 µs = 1 SENT tick
+   * (sent_build_intervals_ticks returns raw SENT ticks, used directly as TIM14 ticks) */
+  htim14.Init.Prescaler = 143U;
   htim14.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim14.Init.Period = 65535;
   htim14.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  /* Preload DISABLED: __HAL_TIM_SET_AUTORELOAD takes immediate effect
+   * so the ISR can set exact low/high durations on each overflow. */
+  htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim14) != HAL_OK)
   {
     Error_Handler();
@@ -284,9 +293,14 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+extern volatile uint32_t g_tim14_isr_count;
+
+/* With TIM14 prescaler=143 → 1 tick = 3 µs.
+ * Low pulse = 5 × 3 µs = 15 µs.
+ * ISR latency at 48 MHz < 1 µs = < 0.33 ticks → round to 0. */
 #define SENT_TX_LOW_TICKS 5U
-#define SENT_TX_FIRST_LOW_COMP_TICKS 1U
-#define SENT_TX_FALL_EDGE_ISR_LATENCY_TICKS 2U
+#define SENT_TX_FIRST_LOW_COMP_TICKS 0U
+#define SENT_TX_FALL_EDGE_ISR_LATENCY_TICKS 0U
 
 static volatile uint8_t g_sent_tx_in_low = 0;
 static volatile uint8_t g_sent_tx_stop_after_low = 0;
@@ -305,6 +319,7 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 
 void SentApp_OnTim14UpdateIrq(void)
 {
+  g_tim14_isr_count++;
   if (!g_sent_tx_in_low)
   {
     if (!SentApp_HasPendingTxIntervals())
@@ -346,7 +361,7 @@ void SentApp_OnTim14UpdateIrq(void)
     if (SentApp_PopNextTxIntervalTicks(&next_ticks))
     {
       g_sent_tx_interval = next_ticks;
-      g_sent_tx_first_interval_high_comp = (g_sent_tx_need_terminal_edge == 0U) ? 1U : 0U;
+      g_sent_tx_first_interval_high_comp = 0U;
       g_sent_tx_need_terminal_edge = 1U;
     }
     else

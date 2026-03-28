@@ -1,3 +1,0 @@
-../Core/Src/sent/sent_decoder.c:24:13:decode_nibble_array	6
-../Core/Src/sent/sent_decoder.c:60:13:decode_pause_interval	5
-../Core/Src/sent/sent_decoder.c:85:6:sent_decode_from_timestamps_us	22
