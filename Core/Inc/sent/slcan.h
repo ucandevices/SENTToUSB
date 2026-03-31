@@ -14,13 +14,17 @@ extern "C" {
 #define SENT_SLCAN_MAX_LINE_LEN 32U
 
 typedef enum {
-    SENT_SLCAN_CMD_OPEN = 0,
-    SENT_SLCAN_CMD_CLOSE,
-    SENT_SLCAN_CMD_VERSION,
-    SENT_SLCAN_CMD_SERIAL,
-    SENT_SLCAN_CMD_FRAME,
-    SENT_SLCAN_CMD_UNSUPPORTED,
-    SENT_SLCAN_CMD_INVALID,
+    SENT_SLCAN_CMD_OPEN = 0,   /* O — open channel (normal mode) */
+    SENT_SLCAN_CMD_LISTEN,     /* L — open channel (listen-only mode, treated as O) */
+    SENT_SLCAN_CMD_CLOSE,      /* C — close channel */
+    SENT_SLCAN_CMD_VERSION,    /* V — hardware version query */
+    SENT_SLCAN_CMD_FWVERSION,  /* v — firmware version query */
+    SENT_SLCAN_CMD_SERIAL,     /* N — serial number query */
+    SENT_SLCAN_CMD_SETBAUD,    /* S/s — set bitrate (ignored, USB CDC) */
+    SENT_SLCAN_CMD_STATUS,     /* F — read status flags */
+    SENT_SLCAN_CMD_FRAME,      /* t/T — CAN frame */
+    SENT_SLCAN_CMD_UNSUPPORTED,/* valid but unimplemented command → ack with \r */
+    SENT_SLCAN_CMD_INVALID,    /* malformed / empty line → nack with \a */
 } sent_slcan_command_type_t;
 
 typedef struct {

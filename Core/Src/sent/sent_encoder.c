@@ -50,7 +50,8 @@ bool sent_build_intervals_ticks(const sent_frame_t* frame,
     uint8_t crc = sent_crc4_j2716(frame->data_nibbles,
                                   frame->data_nibbles_count,
                                   config->crc_mode,
-                                  frame->status);
+                                  frame->status,
+                                  config->crc_init_seed);
     out_intervals_ticks[w++] = (uint16_t)(12U + crc);
 
     if (pause_ticks > 0U) {

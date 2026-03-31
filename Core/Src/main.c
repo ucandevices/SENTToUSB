@@ -109,8 +109,7 @@ int main(void)
 
   /* TIM14 is started on-demand when TX frames are submitted */
 
-  /* Start RX mode: bridge decodes SENT frames from PA2 (TIM2 CH3) */
-  SentApp_StartRxMode();
+  /* RX starts when host sends SLCAN 'O' command */
 
   /* USER CODE END 2 */
 

@@ -30,11 +30,11 @@ static bool response_push(sent_bridge_slcan_responses_t* out_responses, const ch
     return true;
 }
 
-/* Return SLCAN ACK ("\r") or NACK ("\a") string based on success.
- * @param ok  true for ACK, false for NACK
- * @return    "\r" or "\a" */
-static const char* ack_line(bool ok) {
-    return ok ? "\r" : "\a";
+/* Return SLCAN frame ACK ("z\r"/"Z\r") or NACK ("\a") per SLCAN spec.
+ * Standard frames (t) use "z\r", extended frames (T) use "Z\r". */
+static const char* frame_ack_line(bool ok, bool extended) {
+    if (!ok) { return "\a"; }
+    return extended ? "Z\r" : "z\r";
 }
 
 /* HAL helpers — guard + call, return true if no HAL present (no-op). */
@@ -70,28 +70,27 @@ static void bridge_stop_all(sent_bridge_t* b) {
     bridge_stop_tx(b);
 }
 
-/* Serialize a decoded sent_frame_t into a 0x510 CAN frame.
- * @param f      decoded SENT frame
- * @param order  nibble byte-order for packing
- * @param out    [out] CAN frame to populate */
+/* Serialize a decoded sent_frame_t into a compact CAN frame.
+ * Nibbles are packed in pairs: data[i] = nibble[2i]<<4 | nibble[2i+1].
+ * DLC = ceil(data_nibbles_count / 2).
+ * @param f       decoded SENT frame
+ * @param out_id  CAN ID to use for the output frame
+ * @param out     [out] CAN frame to populate */
 static void pack_rx_can_frame(const sent_frame_t* f,
-                               sent_nibble_order_t order,
+                               uint16_t out_id,
                                sent_can_frame_t* out) {
-    uint32_t packed_data = sent_pack_nibbles(f->data_nibbles, f->data_nibbles_count, order);
-    uint16_t tick_x10 = f->tick_x10_us;
+    uint8_t n = f->data_nibbles_count;
+    uint8_t bytes = (n + 1U) / 2U;  /* ceil(n/2) */
 
     memset(out, 0, sizeof(*out));
-    out->id = SENT_CAN_ID_SENT_RX_FRAME;
+    out->id = out_id;
     out->extended = false;
-    out->dlc = 8U;
-    out->data[0] = f->status;
-    out->data[1] = (uint8_t)((packed_data >> 24U) & 0xFFU);
-    out->data[2] = (uint8_t)((packed_data >> 16U) & 0xFFU);
-    out->data[3] = (uint8_t)((packed_data >> 8U) & 0xFFU);
-    out->data[4] = (uint8_t)(packed_data & 0xFFU);
-    out->data[5] = f->crc;
-    out->data[6] = (uint8_t)(tick_x10 & 0xFFU);
-    out->data[7] = (uint8_t)((tick_x10 >> 8U) & 0xFFU);
+    out->dlc = bytes;
+    for (uint8_t i = 0U; i < bytes; ++i) {
+        uint8_t hi = (2U * i     < n) ? (f->data_nibbles[2U * i]      & 0x0FU) : 0U;
+        uint8_t lo = (2U * i + 1U < n) ? (f->data_nibbles[2U * i + 1U] & 0x0FU) : 0U;
+        out->data[i] = (uint8_t)((hi << 4U) | lo);
+    }
 }
 
 /* Unpack a CAN TX frame (ID 0x520) into a SENT frame and submit to TX HAL.
@@ -203,6 +202,7 @@ void sent_bridge_init(sent_bridge_t* bridge,
     memset(bridge, 0, sizeof(*bridge));
     bridge->config = config != NULL ? *config : sent_default_config();
     bridge->config_valid = sent_validate_config(&bridge->config);
+    bridge->output_can_id = SENT_CAN_ID_SENT_RX_FRAME;
     sent_mode_manager_init(&bridge->mode_manager);
 
     if (rx_hal != NULL) {
@@ -232,19 +232,60 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
         return false;
     }
 
-    if (parsed.type == SENT_SLCAN_CMD_OPEN || parsed.type == SENT_SLCAN_CMD_CLOSE) {
+    /* O / L — open channel: start SENT RX */
+    if (parsed.type == SENT_SLCAN_CMD_OPEN || parsed.type == SENT_SLCAN_CMD_LISTEN) {
+        bool ok = handle_cmd_start_rx(bridge);
+        response_push(out_responses, ok ? "\r" : "\a");
+        return true;
+    }
+    /* C — close channel: stop all activity */
+    if (parsed.type == SENT_SLCAN_CMD_CLOSE) {
+        handle_cmd_stop(bridge);
         response_push(out_responses, "\r");
         return true;
     }
+    /* S/s — set bitrate: irrelevant for USB CDC, always ack */
+    if (parsed.type == SENT_SLCAN_CMD_SETBAUD) {
+        response_push(out_responses, "\r");
+        return true;
+    }
+    /* V — hardware version */
     if (parsed.type == SENT_SLCAN_CMD_VERSION) {
         response_push(out_responses, "V0101\r");
         return true;
     }
-    if (parsed.type == SENT_SLCAN_CMD_SERIAL) {
-        response_push(out_responses, "N0001\r");
+    /* v — firmware version (uCCBViewer calls .substring(1) on this; must not be empty) */
+    if (parsed.type == SENT_SLCAN_CMD_FWVERSION) {
+        response_push(out_responses, "v0101\r");
         return true;
     }
-    if (parsed.type == SENT_SLCAN_CMD_UNSUPPORTED || parsed.type == SENT_SLCAN_CMD_INVALID) {
+    /* N — serial number derived from MCU unique ID hash */
+    if (parsed.type == SENT_SLCAN_CMD_SERIAL) {
+        static const char hex[16] = "0123456789ABCDEF";
+        char nbuf[7] = {
+            'N',
+            hex[(bridge->serial_number >> 12) & 0xFU],
+            hex[(bridge->serial_number >>  8) & 0xFU],
+            hex[(bridge->serial_number >>  4) & 0xFU],
+            hex[(bridge->serial_number >>  0) & 0xFU],
+            '\r',
+            '\0'
+        };
+        response_push(out_responses, nbuf);
+        return true;
+    }
+    /* F — read status flags: no errors */
+    if (parsed.type == SENT_SLCAN_CMD_STATUS) {
+        response_push(out_responses, "F00\r");
+        return true;
+    }
+    /* Unknown but syntactically valid commands: ack gracefully */
+    if (parsed.type == SENT_SLCAN_CMD_UNSUPPORTED) {
+        response_push(out_responses, "\r");
+        return true;
+    }
+    /* Malformed / empty line: nack */
+    if (parsed.type == SENT_SLCAN_CMD_INVALID) {
         response_push(out_responses, "\a");
         return true;
     }
@@ -255,6 +296,43 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
     }
 
     const sent_can_frame_t* frame = &parsed.frame;
+
+    /* Config frame: ID 0x001, each byte one SENT parameter.
+     * byte 0: data nibbles (4, 6, or 8)
+     * byte 1: CRC mode (0=data-only, 1=status+data)
+     * byte 2: CRC init seed (e.g. 0x03=APR2016, 0x05=legacy)
+     * byte 3: min tick (units of 0.5 µs; stored as min_tick_x10_us = value*5)
+     * byte 4: max tick (units of µs; stored as max_tick_x10_us = value*10)
+     * byte 5-6: output RX CAN ID, big-endian (11-bit, 0x001-0x7FF) */
+    if (frame->id == SENT_CAN_ID_SENT_CONFIG) {
+        if (frame->dlc >= 1U && frame->data[0] >= 1U && frame->data[0] <= SENT_MAX_DATA_NIBBLES) {
+            bridge->config.data_nibbles = frame->data[0];
+        }
+        if (frame->dlc >= 2U) {
+            bridge->config.crc_mode = (frame->data[1] != 0U)
+                                          ? SENT_CRC_MODE_STATUS_AND_DATA
+                                          : SENT_CRC_MODE_DATA_ONLY;
+        }
+        if (frame->dlc >= 3U && frame->data[2] != 0U) {
+            bridge->config.crc_init_seed = frame->data[2];
+        }
+        if (frame->dlc >= 4U && frame->data[3] != 0U) {
+            bridge->config.min_tick_x10_us = (uint16_t)frame->data[3] * 5U;
+        }
+        if (frame->dlc >= 5U && frame->data[4] != 0U) {
+            bridge->config.max_tick_x10_us = (uint16_t)frame->data[4] * 10U;
+        }
+        if (frame->dlc >= 7U) {
+            uint16_t id = ((uint16_t)frame->data[5] << 8U) | (uint16_t)frame->data[6];
+            if (id >= 1U && id <= 0x7FFU) {
+                bridge->output_can_id = id;
+            }
+        }
+        bridge->config_valid = sent_validate_config(&bridge->config);
+        response_push(out_responses, frame_ack_line(bridge->config_valid, frame->extended));
+        return true;
+    }
+
     if (frame->id == SENT_CAN_ID_SENT_CONTROL && frame->dlc >= 1U) {
         uint8_t command = frame->data[0];
         bool ok;
@@ -271,17 +349,17 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
             ok = false;
         }
 
-        response_push(out_responses, ack_line(ok));
+        response_push(out_responses, frame_ack_line(ok, frame->extended));
         return true;
     }
 
     if (frame->id == SENT_CAN_ID_SENT_TX_FRAME) {
         bool ok = handle_tx_can_frame(bridge, frame);
-        response_push(out_responses, ack_line(ok));
+        response_push(out_responses, frame_ack_line(ok, frame->extended));
         return true;
     }
 
-    response_push(out_responses, "\r");
+    response_push(out_responses, frame_ack_line(true, frame->extended));
     return true;
 }
 
@@ -382,7 +460,7 @@ bool sent_bridge_on_sent_timestamps_us(sent_bridge_t* bridge,
     }
 
     bridge->mode_manager.stats.frames_decoded++;
-    pack_rx_can_frame(&decoded, bridge->config.order, out_can_frame);
+    pack_rx_can_frame(&decoded, bridge->output_can_id, out_can_frame);
     return true;
 }
 

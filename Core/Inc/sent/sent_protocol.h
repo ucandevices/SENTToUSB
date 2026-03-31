@@ -30,6 +30,7 @@ typedef struct {
     bool pause_pulse_enabled;
     uint16_t min_tick_x10_us;
     uint16_t max_tick_x10_us;
+    uint8_t crc_init_seed;   /* 0x03 = APR2016 recommended, 0x05 = legacy */
 } sent_config_t;
 
 typedef struct {

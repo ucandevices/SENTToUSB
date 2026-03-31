@@ -141,7 +141,7 @@ bool sent_decode_from_timestamps_us(const sent_config_t* config,
             data[i] = nibbles[1U + i];
         }
 
-        uint8_t computed_crc = sent_crc4_j2716(data, data_count, config->crc_mode, status);
+        uint8_t computed_crc = sent_crc4_j2716(data, data_count, config->crc_mode, status, config->crc_init_seed);
         if (computed_crc != crc) {
             worst_status = SENT_DECODE_CRC_ERROR;
             continue;

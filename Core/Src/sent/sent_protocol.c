@@ -13,6 +13,7 @@ sent_config_t sent_default_config(void) {
     cfg.pause_pulse_enabled = false;
     cfg.min_tick_x10_us = 30U;
     cfg.max_tick_x10_us = 900U;
+    cfg.crc_init_seed = 0x03U;  /* SAE J2716 APR2016 recommended */
     return cfg;
 }
 

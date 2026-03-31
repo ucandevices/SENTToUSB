@@ -15,6 +15,7 @@
 extern "C" {
 #endif
 
+#define SENT_CAN_ID_SENT_CONFIG  0x001U
 #define SENT_CAN_ID_SENT_CONTROL 0x600U
 #define SENT_CAN_ID_SENT_ACK 0x601U
 #define SENT_CAN_ID_SENT_RX_FRAME 0x510U
@@ -54,6 +55,8 @@ typedef struct {
     sent_tx_hal_t tx_hal;
     bool has_rx_hal;
     bool has_tx_hal;
+    uint16_t output_can_id;
+    uint16_t serial_number;   /* 16-bit hash of MCU unique ID, set after init */
     struct {
         bool active;            /* true while searching for first valid frame to learn tick */
         sent_config_t saved_config; /* original config restored after learning */

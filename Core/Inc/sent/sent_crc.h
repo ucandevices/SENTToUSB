@@ -13,7 +13,8 @@ extern "C" {
 uint8_t sent_crc4_j2716(const uint8_t* data_nibbles,
                         size_t nibble_count,
                         sent_crc_mode_t mode,
-                        uint8_t status_nibble);
+                        uint8_t status_nibble,
+                        uint8_t init_seed);
 
 #ifdef __cplusplus
 }

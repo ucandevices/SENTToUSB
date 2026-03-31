@@ -96,6 +96,10 @@ bool sent_slcan_parse_line(const char* line, sent_slcan_command_t* out_command) 
         out_command->type = SENT_SLCAN_CMD_OPEN;
         return true;
     }
+    if (op == 'L') {
+        out_command->type = SENT_SLCAN_CMD_LISTEN;
+        return true;
+    }
     if (op == 'C') {
         out_command->type = SENT_SLCAN_CMD_CLOSE;
         return true;
@@ -104,15 +108,29 @@ bool sent_slcan_parse_line(const char* line, sent_slcan_command_t* out_command) 
         out_command->type = SENT_SLCAN_CMD_VERSION;
         return true;
     }
+    if (op == 'v') {
+        out_command->type = SENT_SLCAN_CMD_FWVERSION;
+        return true;
+    }
     if (op == 'N') {
         out_command->type = SENT_SLCAN_CMD_SERIAL;
+        return true;
+    }
+    if (op == 'S' || op == 's') {
+        out_command->type = SENT_SLCAN_CMD_SETBAUD;
+        return true;
+    }
+    if (op == 'F') {
+        out_command->type = SENT_SLCAN_CMD_STATUS;
         return true;
     }
     if (op == 'r' || op == 'R') {
         out_command->type = SENT_SLCAN_CMD_UNSUPPORTED;
         return true;
     }
+    /* Any other single-char command: ack gracefully rather than nack */
     if (op != 't' && op != 'T') {
+        out_command->type = SENT_SLCAN_CMD_UNSUPPORTED;
         return true;
     }
 
