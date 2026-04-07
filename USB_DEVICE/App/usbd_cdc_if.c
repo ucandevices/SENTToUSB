@@ -32,7 +32,8 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-
+extern volatile uint32_t dfu_magic;
+extern void JumpToSystemDFU(void);
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -260,7 +261,24 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  SentApp_OnUsbRx(Buf, *Len);
+  uint32_t len = *Len;
+
+  /* Scan for DFU command 'B' — triggers jump to system DFU bootloader */
+  for (uint32_t i = 0; i < len; i++) {
+    if (Buf[i] == 'b' || Buf[i] == 'B') {
+      const char msg[] = "Entering DFU...\r\n";
+      dfu_magic = 0xDEADBEEFu;
+      __DSB(); __ISB();
+      CDC_Transmit_FS((uint8_t*)msg, sizeof(msg) - 1);
+      HAL_Delay(30);
+      USBD_Stop(&hUsbDeviceFS);
+      USBD_DeInit(&hUsbDeviceFS);
+      JumpToSystemDFU();
+      NVIC_SystemReset();
+    }
+  }
+
+  SentApp_OnUsbRx(Buf, len);
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);

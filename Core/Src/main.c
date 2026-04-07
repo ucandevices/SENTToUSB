@@ -46,7 +46,7 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim14;
 
 /* USER CODE BEGIN PV */
-
+__attribute__((section(".noinit"), used)) volatile uint32_t dfu_magic;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -60,6 +60,44 @@ static void MX_TIM14_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+typedef void (*pFunction)(void);
+
+/*
+ * Jump to the STM32F042 ROM DFU bootloader.
+ * Called when the USB CDC 'B' command is received (see usbd_cdc_if.c).
+ * The caller must first set dfu_magic = 0xDEADBEEF and trigger a soft reset,
+ * or call this function directly after disabling all application interrupts.
+ */
+void JumpToSystemDFU(void)
+{
+  __disable_irq();
+
+  /* Stop SysTick so it doesn't fire during the jump sequence */
+  SysTick->CTRL = 0;
+
+  /* Reset peripherals and clocks to a clean state */
+  HAL_RCC_DeInit();
+  HAL_DeInit();
+
+  /* Re-enable SYSCFG and restore the STM32F042G (UFQFPN28) pin remaps.
+   * HAL_DeInit() resets APB2 (which includes SYSCFG), clearing the PA11/PA12
+   * remap and the system-flash memory remap.  Both must be restored so the
+   * ROM bootloader can find USB D+/D- and execute from address 0x00000000. */
+  __HAL_RCC_SYSCFG_CLK_ENABLE();
+  __HAL_REMAP_PIN_ENABLE(HAL_REMAP_PA11_PA12);
+  __HAL_SYSCFG_REMAPMEMORY_SYSTEMFLASH();
+
+  const uint32_t sys = 0x1FFFC400u;  /* STM32F042 system memory base */
+
+  /* Load the ROM's initial stack pointer, then jump to its reset vector */
+  __set_MSP(*(__IO uint32_t*)sys);
+  __DSB(); __ISB();
+
+  pFunction Jump = (pFunction)*(__IO uint32_t*)(sys + 4u);
+  Jump();
+
+  while (1) { /* never returns */ }
+}
 
 /* USER CODE END 0 */
 
@@ -71,6 +109,12 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  /* Check for DFU magic set by USB 'B' command — jump before HAL_Init */
+  if (dfu_magic == 0xDEADBEEFu) {
+    dfu_magic = 0;
+    JumpToSystemDFU();
+  }
+
   /* Disable USB IRQ immediately: DFU bootloader leaves it enabled.
    * If a USB reset fires before HAL_PCD_Init sets Init.speed, the
    * PCD_ResetCallback sees speed==0 and calls Error_Handler. */
@@ -111,6 +155,9 @@ int main(void)
 
   /* RX starts when host sends SLCAN 'O' command */
 
+  /* Ensure PA4 starts HIGH (SENT idle) */
+  SENT_TX_GPIO_Port->BRR  = SENT_TX_Pin;
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -120,6 +167,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* Drain decoded SENT RX frames and flush queued USB responses to the host.
+     * TX is driven entirely by the TIM14 ISR; no polling needed here. */
     SentApp_Process();
   }
   /* USER CODE END 3 */
@@ -241,9 +290,11 @@ static void MX_TIM14_Init(void)
 
   /* USER CODE END TIM14_Init 1 */
   htim14.Instance = TIM14;
-  /* Prescaler 143: 48 MHz / 144 = 333.33 kHz → 1 TIM14 tick = 3 µs = 1 SENT tick
-   * (sent_build_intervals_ticks returns raw SENT ticks, used directly as TIM14 ticks) */
-  htim14.Init.Prescaler = 143U;
+  /* Prescaler 71: 48 MHz / 72 = 666.67 kHz.  With ARR = 1 the timer fires every
+   * 2 counts → period = 2 × 72 / 48 MHz = 3 µs = 1 SENT tick.
+   * (ARR = 0 is avoided: STM32 timers do not reliably generate update events
+   * when the counter starts at ARR = 0 and has nowhere to count to.) */
+  htim14.Init.Prescaler = 71U;
   htim14.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim14.Init.Period = 65535;
   htim14.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -292,21 +343,12 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-extern volatile uint32_t g_tim14_isr_count;
-
-/* With TIM14 prescaler=143 → 1 tick = 3 µs.
- * Low pulse = 5 × 3 µs = 15 µs.
- * ISR latency at 48 MHz < 1 µs = < 0.33 ticks → round to 0. */
-#define SENT_TX_LOW_TICKS 5U
-#define SENT_TX_FIRST_LOW_COMP_TICKS 0U
-#define SENT_TX_FALL_EDGE_ISR_LATENCY_TICKS 0U
-
-static volatile uint8_t g_sent_tx_in_low = 0;
-static volatile uint8_t g_sent_tx_stop_after_low = 0;
-static volatile uint8_t g_sent_tx_need_terminal_edge = 0;
-static volatile uint8_t g_sent_tx_first_interval_high_comp = 0;
-static volatile uint16_t g_sent_tx_interval = 0;
-
+/*
+ * TIM2 CH3 input-capture callback — fires on every RISING edge on PA2.
+ * PA2 is connected to the SENT sensor output (active-LOW signal).  Each rising
+ * edge marks the end of a low pulse; the captured counter value lets the RX HAL
+ * reconstruct interval durations by differencing consecutive captures.
+ */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_3)
@@ -316,100 +358,16 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
   }
 }
 
-void SentApp_OnTim14UpdateIrq(void)
-{
-  g_tim14_isr_count++;
-  if (!g_sent_tx_in_low)
-  {
-    if (!SentApp_HasPendingTxIntervals())
-    {
-      if (g_sent_tx_need_terminal_edge)
-      {
-        /* Emit one delimiter edge to close the last pause interval cleanly. */
-        SENT_TX_GPIO_Port->BRR = SENT_TX_Pin;
-        __HAL_TIM_SET_COUNTER(&htim14, 0U);
-        __HAL_TIM_SET_AUTORELOAD(&htim14, SENT_TX_LOW_TICKS - 1U);
-        g_sent_tx_in_low = 1;
-        g_sent_tx_stop_after_low = 1U;
-        g_sent_tx_need_terminal_edge = 0U;
-        return;
-      }
-
-      SENT_TX_GPIO_Port->BSRR = SENT_TX_Pin;
-      g_sent_tx_in_low = 0U;
-      g_sent_tx_stop_after_low = 0U;
-      g_sent_tx_first_interval_high_comp = 0U;
-      HAL_TIM_Base_Stop_IT(&htim14);
-      return;
-    }
-
-    /* Phase 0: falling edge marks start of next SENT interval. */
-    SENT_TX_GPIO_Port->BRR = SENT_TX_Pin;
-    __HAL_TIM_SET_COUNTER(&htim14, 0U);
-    uint16_t low_ticks = SENT_TX_LOW_TICKS;
-    if (g_sent_tx_need_terminal_edge == 0U &&
-        low_ticks > SENT_TX_FIRST_LOW_COMP_TICKS)
-    {
-      low_ticks = (uint16_t)(low_ticks - SENT_TX_FIRST_LOW_COMP_TICKS);
-    }
-    __HAL_TIM_SET_AUTORELOAD(&htim14, low_ticks - 1U);
-    g_sent_tx_in_low = 1;
-    g_sent_tx_stop_after_low = 0U;
-
-    uint16_t next_ticks;
-    if (SentApp_PopNextTxIntervalTicks(&next_ticks))
-    {
-      g_sent_tx_interval = next_ticks;
-      g_sent_tx_first_interval_high_comp = 0U;
-      g_sent_tx_need_terminal_edge = 1U;
-    }
-    else
-    {
-      SENT_TX_GPIO_Port->BSRR = SENT_TX_Pin;
-      g_sent_tx_in_low = 0;
-      g_sent_tx_stop_after_low = 0U;
-      g_sent_tx_need_terminal_edge = 0U;
-      g_sent_tx_first_interval_high_comp = 0U;
-      HAL_TIM_Base_Stop_IT(&htim14);
-    }
-  }
-  else
-  {
-    /* Phase 1: end of low pulse. */
-    SENT_TX_GPIO_Port->BSRR = SENT_TX_Pin;
-    if (g_sent_tx_stop_after_low)
-    {
-      g_sent_tx_in_low = 0U;
-      g_sent_tx_stop_after_low = 0U;
-      HAL_TIM_Base_Stop_IT(&htim14);
-    }
-    else
-    {
-      uint16_t high_ticks = (uint16_t)(g_sent_tx_interval - SENT_TX_LOW_TICKS);
-      if (high_ticks > SENT_TX_FALL_EDGE_ISR_LATENCY_TICKS)
-      {
-        high_ticks = (uint16_t)(high_ticks - SENT_TX_FALL_EDGE_ISR_LATENCY_TICKS);
-      }
-      else
-      {
-        high_ticks = 1U;
-      }
-      if (g_sent_tx_first_interval_high_comp != 0U)
-      {
-        if (high_ticks > 1U)
-        {
-          high_ticks = (uint16_t)(high_ticks - 1U);
-        }
-        g_sent_tx_first_interval_high_comp = 0U;
-      }
-
-      __HAL_TIM_SET_COUNTER(&htim14, 0U);
-      __HAL_TIM_SET_AUTORELOAD(&htim14, high_ticks - 1U);
-      g_sent_tx_in_low = 0;
-    }
-  }
-}
-
+/*
+ * TIM2 overflow and TIM14 update callbacks.
+ *
+ * TIM2 overflow: notifies the RX HAL so it can extend 16-bit timestamps across
+ *   the 65536-count rollover (~1.37 ms at 48 MHz).
+ *
+ * TIM14 update: drives the two-phase SENT TX pulse on PA4.  The actual ISR
+ *   logic lives in SentApp_OnTim14UpdateIrq() (sent_app.c) so all TX state
+ *   is co-located with the TX HAL.
+ */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)

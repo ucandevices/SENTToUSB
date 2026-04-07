@@ -370,15 +370,16 @@ void sent_stm32f042_make_tx_hal(sent_stm32f042_tx_hal_t* impl, sent_tx_hal_t* ou
 }
 
 /* ISR handler: pop the next TX interval duration, loading next queued frame if needed.
+ * Note: does NOT check hal->running so that a frame already queued completes fully even
+ * when stop_tx() is called mid-frame (e.g. when switching back to RX mode).  New frames
+ * are blocked at submission time (stm32_tx_submit checks running), so the queue drains
+ * to empty and the ISR stops naturally once all intervals have been emitted.
  * @param hal                TX HAL instance
  * @param out_interval_ticks [out] next interval duration [timer ticks]
  * @return                   true if an interval was available, false if TX idle */
 bool sent_stm32f042_tx_pop_next_interval_ticks_from_isr(sent_stm32f042_tx_hal_t* hal,
                                                          uint16_t* out_interval_ticks) {
     SENT_ASSERT(hal != NULL && out_interval_ticks != NULL);
-    if (!hal->running) {
-        return false;
-    }
 
     uint8_t index = hal->active_index;
     uint8_t count = hal->active_count;

@@ -411,11 +411,12 @@ class SentMonitor:
         self.log.pack(fill=tk.BOTH)
 
         # Color tags for log
-        self.log.tag_config("info",  foreground="#00BFFF")   # V/v/N/F responses
+        self.log.tag_config("info",   foreground="#00BFFF")   # V/v/N/F responses
         self.log.tag_config("dbg",   foreground="#FFAA44")   # command ACK (\r)
         self.log.tag_config("raw",   foreground="#FF6666")   # NACK (\a)
         self.log.tag_config("slcan", foreground="#666688")   # data frame t/T
         self.log.tag_config("other", foreground="#555566")   # z/Z frame ACK
+        self.log.tag_config("tx_cmd", foreground="#55FF55")  # outgoing commands → host
 
     # ── Serial port helpers ───────────────────────────────────────────────────
 
@@ -436,7 +437,7 @@ class SentMonitor:
             self.rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
             self.rx_thread.start()
             # SLCAN: send 'O\r' to open channel — firmware starts SENT RX only after this
-            self.serial_port.write(b"O\r")
+            self._send(b"O\r")
             self._send_config()
             self.connect_btn.config(state=tk.DISABLED)
             self.disconnect_btn.config(state=tk.NORMAL)
@@ -450,7 +451,7 @@ class SentMonitor:
             return
         self.learn_result_var.set("Learning...")
         self.learn_btn.config(state=tk.DISABLED)
-        self.serial_port.write(b"t600104\r")
+        self._send(b"t600104\r")
 
     def _send_config(self):
         """Build and send a 0x001 config frame with the current UI parameters.
@@ -482,7 +483,7 @@ class SentMonitor:
             data = bytes([nibbles, crc_mode, seed, min_b, max_b,
                           (can_id >> 8) & 0xFF, can_id & 0xFF])
             slcan = "t001" + "7" + data.hex().upper() + "\r"
-            self.serial_port.write(slcan.encode("ascii"))
+            self._send(slcan.encode("ascii"))
         except (ValueError, TypeError):
             pass
 
@@ -504,15 +505,33 @@ class SentMonitor:
             return None
 
     def _tx_send(self):
-        """One-shot TX: switch to TX mode, send one frame, switch back to RX."""
+        """One-shot TX: switch to TX mode, send one frame, then resume RX after a delay.
+
+        The three commands (start TX / frame / start RX) must NOT be sent back-to-back
+        in the same call: they would land in one USB packet, be processed inside a single
+        USB interrupt, and the "resume RX" command would arrive before TIM14 has had a
+        chance to fire and drain the TX queue.  The TIM14 ISR runs at lower priority than
+        USB, so it can only start after the USB interrupt returns.
+
+        Fix: send the resume-RX command via root.after() so it is deferred by at least
+        one Tkinter event-loop iteration (25 ms), well past the ~1.5 ms a SENT frame takes.
+        """
         if not self.serial_port or not self.serial_port.is_open:
             return
+        if self.tx_periodic_active:
+            return   # periodic TX is already running; ignore one-shot
         frame = self._tx_build_frame()
         if frame is None:
             return
-        self.serial_port.write(b"t600102\r")   # start TX mode
-        self.serial_port.write(frame)
-        self.serial_port.write(b"t600101\r")   # resume RX mode
+        self._send(b"t600102\r")   # switch to TX mode
+        self._send(frame)           # queue one SENT frame
+        # Resume RX after 25 ms — enough for TIM14 to finish the frame (~1.5 ms max)
+        self.root.after(25, self._tx_resume_rx)
+
+    def _tx_resume_rx(self):
+        """Deferred RX resume after a one-shot TX send."""
+        if self.serial_port and self.serial_port.is_open and not self.tx_periodic_active:
+            self._send(b"t600101\r")   # switch back to RX mode
 
     def _tx_toggle(self):
         """Start or stop periodic TX."""
@@ -521,7 +540,7 @@ class SentMonitor:
                 return
             self.tx_periodic_active = True
             self.tx_toggle_btn.config(text="Stop")
-            self.serial_port.write(b"t600102\r")   # start TX mode
+            self._send(b"t600102\r")   # switch to TX mode
             self._tx_tick()
         else:
             self._tx_stop()
@@ -533,7 +552,7 @@ class SentMonitor:
         if self.serial_port and self.serial_port.is_open:
             frame = self._tx_build_frame()
             if frame:
-                self.serial_port.write(frame)
+                self._send(frame)
         try:
             period = max(10, int(self.tx_period_var.get()))
         except (ValueError, TypeError):
@@ -548,7 +567,7 @@ class SentMonitor:
             self.root.after_cancel(self._tx_after_id)
             self._tx_after_id = None
         if self.serial_port and self.serial_port.is_open:
-            self.serial_port.write(b"t600101\r")   # resume RX mode
+            self._send(b"t600101\r")   # resume RX mode
 
     def _disconnect(self):
         self._tx_stop()
@@ -556,7 +575,7 @@ class SentMonitor:
         if self.serial_port:
             try:
                 # SLCAN: send 'C\r' to close channel before disconnecting
-                self.serial_port.write(b"C\r")
+                self._send(b"C\r")
                 self.serial_port.close()
             except Exception:
                 pass
@@ -725,25 +744,34 @@ class SentMonitor:
         if len(self._tree_iids) > self.MAX_TABLE_ROWS:
             self.tree.delete(self._tree_iids.pop())
 
-    def _append_log(self, text: str):
-        # Tag each line by SLCAN response type:
-        #   slcan  — data frame  t/T...
-        #   other  — frame ACK   z / Z
-        #   mlx    — info resp   V.../v.../N.../F...
-        #   raw    — NACK        \a (bell)
-        #   dbg    — command ACK \r (empty line after strip)
-        if re.match(r'^t[0-9A-Fa-f]', text):
-            tag = "slcan"
-        elif re.match(r'^[zZ]$', text):
-            tag = "other"   # frame ACK
-        elif re.match(r'^[VvNF]', text):
-            tag = "info"    # version / serial / status response
-        elif '\x07' in text or text == '\a':
-            tag = "raw"     # NACK (\a = bell)
-        elif text == "":
-            tag = "dbg"     # command ACK (\r stripped to empty)
-        else:
-            tag = "other"
+    def _send(self, data: bytes):
+        """Write bytes to the serial port and echo them to the raw log (green)."""
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.write(data)
+            label = data.decode("ascii", errors="replace").replace("\r", "\\r")
+            self._append_log(f"→ {label}", tag="tx_cmd")
+
+    def _append_log(self, text: str, tag: str | None = None):
+        # Tag each line by SLCAN response type (caller may override with explicit tag):
+        #   tx_cmd — outgoing command  → ...
+        #   slcan  — data frame        t/T...
+        #   other  — frame ACK         z / Z
+        #   info   — info resp         V.../v.../N.../F...
+        #   raw    — NACK              \a (bell)
+        #   dbg    — command ACK       \r (empty line after strip)
+        if tag is None:
+            if re.match(r'^t[0-9A-Fa-f]', text):
+                tag = "slcan"
+            elif re.match(r'^[zZ]$', text):
+                tag = "other"   # frame ACK
+            elif re.match(r'^[VvNF]', text):
+                tag = "info"    # version / serial / status response
+            elif '\x07' in text or text == '\a':
+                tag = "raw"     # NACK (\a = bell)
+            elif text == "":
+                tag = "dbg"     # command ACK (\r stripped to empty)
+            else:
+                tag = "other"
 
         self.log.config(state=tk.NORMAL)
         self.log.insert(tk.END, text + "\n", tag)
