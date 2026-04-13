@@ -180,8 +180,9 @@ void SentApp_Init(void)
 
     /* ── RX HAL ──
      * TIM2 runs at 48 MHz, 16-bit free-running.  PA2 = TIM2_CH3 (AF2), RISING edge.
-     * capture_batch_size = nibbles + 4 edges: sync + status + N_data + CRC + leading edge
-     *   of the next interval.  For MLX90377 (6 nibbles): 6+4 = 10 edges per frame.
+     * capture_batch_size = nibbles + 4 edges: sync-end + status-end + N_data-ends +
+     *   CRC-end + pause-end.  For MLX90377 (6 nibbles): 6+4 = 10 edges per frame.
+     *
      * sync_min_us = 100 µs: the HAL resets batch alignment when it sees an interval
      *   longer than this.  Max data nibble at 3 µs/tick = 15+12 = 81 µs < 100 µs,
      *   and sync = 56 ticks = 168 µs >> 100 µs, so this unambiguously marks frame start. */

@@ -140,7 +140,7 @@ static bool handle_cmd_start_rx(sent_bridge_t* b) {
     }
     bool ok = bridge_start_rx(b);
     if (ok) {
-        bridge_stop_tx(b);
+        bridge_stop_tx(b);           /* stop TX HAL (TIM14 drains naturally) */
         sent_mode_manager_start_rx(&b->mode_manager);
     }
     return ok;

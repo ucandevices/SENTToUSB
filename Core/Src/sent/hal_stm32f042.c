@@ -69,7 +69,15 @@ static void rx_push_active_batch_from_isr(sent_stm32f042_rx_hal_t* hal) {
         slot->timestamps_us[i] = hal->active_timestamps_us[i];
     }
 
-    hal->active_count = 0U;
+    /* Retain the last captured edge as ts[0] for the next batch.
+     * After a push, the SENT bus is idle for ~99 ms (inter-frame gap) and
+     * the very next edge is the sync-end of the next frame.  If active_count
+     * were reset to 0 here, the sync detection guard (active_count > 0) would
+     * fail on that sync-end, placing it at ts[0] instead of ts[1] and
+     * permanently misaligning every subsequent batch.  With active_count=1,
+     * sync detection fires correctly and aligns the batch on the next frame. */
+    hal->active_timestamps_us[0] = hal->active_timestamps_us[hal->active_count - 1U];
+    hal->active_count = 1U;
     hal->ready_head = next_head;
 }
 
@@ -209,12 +217,9 @@ void sent_stm32f042_rx_on_capture_edge_isr(sent_stm32f042_rx_hal_t* hal,
     }
 
     uint32_t period = (uint32_t)hal->config.timer_autoreload + 1U;
-    uint32_t counter_ticks = (hal->overflow_count * period) + captured_counter;
-    if (counter_ticks < hal->last_counter_ticks) {
-        counter_ticks += period;
-    }
+    uint64_t counter_ticks = ((uint64_t)hal->overflow_count * period) + captured_counter;
 
-    uint32_t delta_ticks = counter_ticks - hal->last_counter_ticks;
+    uint32_t delta_ticks = (uint32_t)(counter_ticks - hal->last_counter_ticks);
     hal->last_counter_ticks = counter_ticks;
 
     uint32_t prev_timestamp_us = hal->last_timestamp_us;

@@ -263,7 +263,12 @@ static void MX_TIM2_Init(void)
   sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
   sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
   sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
-  sConfigIC.ICFilter = 0;
+  /* ICFilter = 3: fSAMPLING = fCKINT (48 MHz), N = 8 samples required.
+   * Rejects glitches shorter than 8/48 MHz ≈ 167 ns while passing all SENT
+   * signal edges (minimum active-LOW pulse = 5 ticks = 15 µs >> 167 ns).
+   * This eliminates spurious captures from NPN-transistor switching ringing
+   * that corrupt the 10-edge RX batch and cause decode failures. */
+  sConfigIC.ICFilter = 3;
   if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_3) != HAL_OK)
   {
     Error_Handler();

@@ -45,7 +45,7 @@ typedef struct {
     sent_stm32f042_rx_config_t config;
     volatile uint32_t overflow_count;
     volatile uint32_t dropped_batches;
-    uint32_t last_counter_ticks;
+    uint64_t last_counter_ticks;
     uint32_t last_timestamp_us;
     uint32_t ticks_to_us_mul_q12;
     uint32_t ticks_to_us_frac_q12;

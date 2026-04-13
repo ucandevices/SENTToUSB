@@ -78,7 +78,7 @@ SENSOR_PRESETS = {
 # ─── Main application ─────────────────────────────────────────────────────────
 
 class SentMonitor:
-    MAX_TABLE_ROWS = 100   # rows kept in the frame table
+    MAX_TABLE_ROWS = 10000  # rows kept in the frame table
     POLL_MS        = 40    # UI update interval
 
     def __init__(self, root: tk.Tk):
@@ -292,6 +292,12 @@ class SentMonitor:
             ttk.Label(stats, textvariable=var, foreground=fg, **lbl_style).pack(
                 side=tk.LEFT, padx=3)
 
+        self.drop_frames_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(stats, text="Limit frame rate", variable=self.drop_frames_var,
+                       bg="#1e1e2e", fg="#AAAACC", selectcolor="#2a2a3e",
+                       activebackground="#1e1e2e", activeforeground="#CCCCDD",
+                       font=("Consolas", 9)).pack(side=tk.LEFT, padx=(10, 3))
+
         # ── Middle: RX display left, TX panel centred in remaining space ──
         mid = ttk.Frame(parent)
         mid.pack(fill=tk.X, padx=6, pady=(4,2))
@@ -475,7 +481,7 @@ class SentMonitor:
             can_id   = int(self.param_vars["data_can_id"].get(), 0)
 
             min_b = max(1, round(tick * 0.8 / 0.5))   # 80 % of tick in 0.5 µs units
-            max_b = max(1, round(tick * 1.5))           # 150 % of tick in 1 µs units
+            max_b = max(1, int(tick * 1.5 + 0.5))       # 150 % of tick in 1 µs units
             min_b  = min(min_b, 255)
             max_b  = min(max_b, 255)
             can_id = max(1, min(can_id, 0x7FF))
@@ -635,17 +641,23 @@ class SentMonitor:
 
     def _poll_queue(self):
         try:
-            # Drain the entire queue. For data frames keep only the LATEST to avoid
-            # tkinter display lag at 300+ fps. All other SLCAN lines are logged as-is.
-            # Count ALL data frames for fps/frame-count; display only newest.
+            # Drain the entire queue. When drop_frames is enabled, keep only the
+            # LATEST data frame per poll cycle to avoid tkinter lag at high fps.
+            # When disabled, every frame is processed (may lag at 300+ fps).
+            # All non-data SLCAN lines (ACKs, NACKs, etc.) are always logged.
+            drop = self.drop_frames_var.get()
             last_data: str | None = None
+            pending_data: list[str] = []
             now = time.monotonic()
             while True:
                 line = self.rx_queue.get_nowait()
                 if re.match(r'^t[0-9A-Fa-f]', line):
-                    last_data = line   # keep only newest data frame for display
                     self.frame_count += 1
                     self._frame_times.append(now)
+                    if drop:
+                        last_data = line   # keep only newest
+                    else:
+                        pending_data.append(line)
                 else:
                     # ACKs (\r → shown as blank), NACKs (\a), z/Z, V/v/N/F responses
                     self._append_log(line)
@@ -659,8 +671,12 @@ class SentMonitor:
         self.sv_frames.set(f"Frames: {self.frame_count}")
         self.sv_rate.set(f"Rate: {rate:.1f} fps")
 
-        if last_data is not None:
-            self._process_line(last_data)
+        if drop:
+            if last_data is not None:
+                self._process_line(last_data)
+        else:
+            for frame in pending_data:
+                self._process_line(frame)
         self.root.after(self.POLL_MS, self._poll_queue)
 
     def _process_line(self, line: str):
