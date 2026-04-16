@@ -270,7 +270,28 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
       dfu_magic = 0xDEADBEEFu;
       __DSB(); __ISB();
       CDC_Transmit_FS((uint8_t*)msg, sizeof(msg) - 1);
-      HAL_Delay(30);
+
+      FLASH_OBProgramInitTypeDef OBParam;
+
+      HAL_FLASHEx_OBGetConfig(&OBParam);
+
+      OBParam.OptionType = OPTIONBYTE_USER;
+      /*Reset NBOOT0 and BOOT_SEL,  see: RM 2.5 Boot configuration*/
+      OBParam.USERConfig = 0x77; //Sorry for magic number :)
+
+      HAL_FLASH_Unlock();
+      HAL_FLASH_OB_Unlock();
+
+      HAL_FLASHEx_OBErase();
+
+      HAL_FLASHEx_OBProgram(&OBParam);
+
+      HAL_FLASH_OB_Lock();
+      HAL_FLASH_Lock();
+
+      HAL_FLASH_OB_Launch();
+
+      HAL_Delay(1);
       USBD_Stop(&hUsbDeviceFS);
       USBD_DeInit(&hUsbDeviceFS);
       JumpToSystemDFU();

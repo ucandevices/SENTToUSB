@@ -57,7 +57,7 @@ static uint16_t g_slcan_in_len;
 
 /* USB TX ring buffer — responses queued here, flushed from the main loop.
  * Decouples USB transmit (which may be busy) from ISR/callback context. */
-#define USB_TX_BUF_SIZE 448U
+#define USB_TX_BUF_SIZE 408U
 static uint8_t  g_usb_tx[USB_TX_BUF_SIZE];
 static uint16_t g_usb_tx_head;
 static uint16_t g_usb_tx_tail;

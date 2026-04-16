@@ -110,10 +110,31 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
   /* Check for DFU magic set by USB 'B' command — jump before HAL_Init */
-  if (dfu_magic == 0xDEADBEEFu) {
-    dfu_magic = 0;
-    JumpToSystemDFU();
-  }
+//  if (dfu_magic == 0xDEADBEEFu) {
+//    dfu_magic = 0;
+
+    FLASH_OBProgramInitTypeDef OBParam;
+
+    HAL_FLASHEx_OBGetConfig(&OBParam);
+
+    if(OBParam.USERConfig != 0x7F)
+    {
+
+        OBParam.OptionType = OPTIONBYTE_USER;
+        OBParam.USERConfig = 0x7F;
+
+        HAL_FLASH_Unlock();
+        HAL_FLASH_OB_Unlock();
+        HAL_FLASHEx_OBErase();
+        HAL_FLASHEx_OBProgram(&OBParam);
+        HAL_FLASH_OB_Lock();
+        HAL_FLASH_OB_Launch();
+
+        JumpToSystemDFU();
+    }
+
+
+//  }
 
   /* Disable USB IRQ immediately: DFU bootloader leaves it enabled.
    * If a USB reset fires before HAL_PCD_Init sets Init.speed, the
