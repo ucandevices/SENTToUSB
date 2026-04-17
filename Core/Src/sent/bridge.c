@@ -39,10 +39,17 @@ static const char* frame_ack_line(bool ok, bool extended) {
 
 /* HAL helpers — guard + call, return true if no HAL present (no-op). */
 
+static void bridge_sync_rx_batch_size(sent_bridge_t* b) {
+    if (b->has_rx_hal && b->rx_hal.set_data_nibbles != NULL) {
+        b->rx_hal.set_data_nibbles(b->rx_hal.context, b->config.data_nibbles);
+    }
+}
+
 static bool bridge_start_rx(sent_bridge_t* b) {
     if (!b->has_rx_hal || b->rx_hal.start_rx == NULL) {
         return true;
     }
+    bridge_sync_rx_batch_size(b);
     return b->rx_hal.start_rx(b->rx_hal.context);
 }
 
@@ -329,6 +336,7 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
             }
         }
         bridge->config_valid = sent_validate_config(&bridge->config);
+        bridge_sync_rx_batch_size(bridge);
         response_push(out_responses, frame_ack_line(bridge->config_valid, frame->extended));
         return true;
     }

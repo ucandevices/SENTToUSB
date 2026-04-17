@@ -184,6 +184,17 @@ void sent_stm32f042_rx_hal_init(sent_stm32f042_rx_hal_t* hal,
     }
 }
 
+/* Update capture_batch_size when data_nibbles changes.
+ * Safe to call from main context while RX is running: uint8_t writes are atomic
+ * on Cortex-M0 and the ISR will pick up the new size on the next edge.
+ * Resets active_count to discard any partial batch built with the old size. */
+static void stm32_rx_set_data_nibbles(void* context, uint8_t data_nibbles) {
+    sent_stm32f042_rx_hal_t* hal = (sent_stm32f042_rx_hal_t*)context;
+    SENT_ASSERT(hal != NULL);
+    hal->config.capture_batch_size = (uint8_t)(data_nibbles + 4U);
+    hal->active_count = 0U;
+}
+
 /* Wire STM32 RX HAL implementation into the generic RX HAL interface.
  * @param impl     STM32 RX HAL instance
  * @param out_hal  [out] generic RX HAL function-pointer struct to populate */
@@ -194,6 +205,7 @@ void sent_stm32f042_make_rx_hal(sent_stm32f042_rx_hal_t* impl, sent_rx_hal_t* ou
     out_hal->start_rx = stm32_rx_start;
     out_hal->stop_rx = stm32_rx_stop;
     out_hal->poll_timestamps_us = stm32_rx_poll;
+    out_hal->set_data_nibbles = stm32_rx_set_data_nibbles;
 }
 
 /* ISR handler: process a captured falling-edge counter value, convert to timestamp.

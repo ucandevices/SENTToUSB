@@ -263,9 +263,13 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
   /* USER CODE BEGIN 6 */
   uint32_t len = *Len;
 
-  /* Scan for DFU command 'B' — triggers jump to system DFU bootloader */
-  for (uint32_t i = 0; i < len; i++) {
-    if (Buf[i] == 'b' || Buf[i] == 'B') {
+  /* Scan for DFU command "boot" — must be followed by \r, \n, or end of packet */
+  for (uint32_t i = 0; i + 4 <= len; i++) {
+    if ((Buf[i]   == 'b' || Buf[i]   == 'B') &&
+        (Buf[i+1] == 'o' || Buf[i+1] == 'O') &&
+        (Buf[i+2] == 'o' || Buf[i+2] == 'O') &&
+        (Buf[i+3] == 't' || Buf[i+3] == 'T') &&
+        (i + 4 == len || Buf[i+4] == '\r' || Buf[i+4] == '\n')) {
       const char msg[] = "Entering DFU...\r\n";
       dfu_magic = 0xDEADBEEFu;
       __DSB(); __ISB();

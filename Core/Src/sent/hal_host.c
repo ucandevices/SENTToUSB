@@ -144,6 +144,7 @@ void sent_host_make_rx_hal(sent_host_rx_hal_t* impl, sent_rx_hal_t* out_hal) {
     out_hal->start_rx = host_rx_start;
     out_hal->stop_rx = host_rx_stop;
     out_hal->poll_timestamps_us = host_rx_poll;
+    out_hal->set_data_nibbles = NULL;
 }
 
 static bool host_tx_start(void* context) {

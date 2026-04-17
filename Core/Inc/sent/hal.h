@@ -17,6 +17,9 @@ typedef void (*sent_rx_stop_fn)(void* context);
 typedef bool (*sent_rx_poll_timestamps_fn)(void* context,
                                            uint32_t* out_timestamps_us,
                                            size_t* inout_timestamp_count);
+/* Optional: update capture_batch_size when data_nibbles changes.
+ * Called by bridge config handler and bridge_start_rx. May be NULL. */
+typedef void (*sent_rx_set_data_nibbles_fn)(void* context, uint8_t data_nibbles);
 
 typedef bool (*sent_tx_start_fn)(void* context);
 typedef void (*sent_tx_stop_fn)(void* context);
@@ -30,6 +33,7 @@ typedef struct {
     sent_rx_start_fn start_rx;
     sent_rx_stop_fn stop_rx;
     sent_rx_poll_timestamps_fn poll_timestamps_us;
+    sent_rx_set_data_nibbles_fn set_data_nibbles;  /* optional, NULL if not supported */
 } sent_rx_hal_t;
 
 typedef struct {
