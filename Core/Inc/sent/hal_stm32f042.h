@@ -14,7 +14,7 @@ extern "C" {
 #define SENT_STM32F042_RX_MAX_BATCH_SIZE SENT_MAX_TIMESTAMPS
 #define SENT_STM32F042_RX_MAX_READY_BATCHES 3U
 #define SENT_STM32F042_TX_MAX_INTERVALS SENT_MAX_INTERVALS
-#define SENT_STM32F042_TX_QUEUE_DEPTH 4U
+#define SENT_STM32F042_TX_MAX_TOGGLES   (SENT_MAX_INTERVALS * 2U) /* 2 toggle edges per interval */
 
 typedef struct {
     uint32_t timer_clock_hz;
@@ -30,11 +30,6 @@ typedef struct {
      * long interval re-fires and corrects the alignment automatically. */
     uint32_t sync_min_us;
 } sent_stm32f042_rx_config_t;
-
-typedef struct {
-    uint16_t intervals_ticks[SENT_STM32F042_TX_MAX_INTERVALS];
-    uint8_t count;
-} sent_stm32f042_tx_frame_intervals_t;
 
 typedef struct {
     uint32_t timestamps_us[SENT_STM32F042_RX_MAX_BATCH_SIZE];
@@ -60,17 +55,16 @@ typedef struct {
 
 typedef struct {
     uint16_t default_pause_ticks;
-    uint8_t max_pending_frames;    /* max SENT_STM32F042_TX_QUEUE_DEPTH (8) */
+    uint8_t  low_ticks;   /* LOW-phase duration per interval [ticks]; SAE J2716 min = 5 */
 } sent_stm32f042_tx_config_t;
 
 typedef struct {
     sent_stm32f042_tx_config_t config;
-    sent_stm32f042_tx_frame_intervals_t frame_queue[SENT_STM32F042_TX_QUEUE_DEPTH];
-    uint16_t active_intervals[SENT_STM32F042_TX_MAX_INTERVALS];
-    volatile uint8_t queue_head;
-    volatile uint8_t queue_tail;
-    uint8_t active_count;      /* ISR-only: no volatile needed */
-    uint8_t active_index;      /* ISR-only: no volatile needed */
+    /* Pre-expanded toggle durations: [LOW, HIGH, LOW, HIGH, ...] for each SENT interval.
+     * Written by stm32_tx_submit; read by ISR. count published last (M0 store barrier). */
+    uint16_t intervals[SENT_STM32F042_TX_MAX_TOGGLES];
+    volatile uint8_t count;   /* total toggle entries; 0 = idle */
+    uint8_t active_index;     /* ISR-only: no volatile needed */
     bool running;
 } sent_stm32f042_tx_hal_t;
 

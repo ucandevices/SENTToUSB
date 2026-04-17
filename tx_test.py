@@ -114,14 +114,49 @@ def main():
         print(f"    Frame {i}: {a!r}  [{status}]")
         time.sleep(0.2)   # Wait after each so TIM14 can drain
 
-    # --- Step 5: Continuously TX and monitor COM9 ---
-    print("\n[7] Sending 10 frames with 50ms spacing, watching COM9 raw output...")
+    # --- Step 5: Send 10 frames with ACK-based pacing, monitor COM9 ---
+    # Root cause of 3/10: Python bundles all writes into one USB packet, so the
+    # STM32 processes all 10 submits back-to-back before TIM14 drains the first
+    # frame.  Fix: wait for 'z\r' ACK before sending the next frame; if '\a'
+    # (slot busy), back off 2ms and retry.
+    SENT_FRAME_US = 520   # µs — conservative upper bound for one SENT frame
+    N_FRAMES = 10
+    print(f"\n[7] Sending {N_FRAMES} frames with ACK-paced flow control, watching COM9...")
     s9.reset_input_buffer()
-    for i in range(10):
-        s8.write(FRAME)
-        time.sleep(0.05)
+    s8.reset_input_buffer()
+    s8.timeout = 0.05   # 50ms read timeout per byte
 
-    # Give COM9 1 second to output decoded frames
+    accepted = 0
+    rejected = 0
+    for i in range(N_FRAMES):
+        for attempt in range(20):           # up to 20 retries per frame
+            s8.write(FRAME)
+            # Read until we see 'z' (ACK) or BEL/'\a' (NACK), up to 50ms
+            deadline = time.time() + 0.05
+            resp = b""
+            while time.time() < deadline:
+                ch = s8.read(1)
+                if not ch:
+                    break
+                resp += ch
+                if b'z' in resp or b'\x07' in resp:
+                    break
+            if b'z' in resp:
+                accepted += 1
+                print(f"    Frame {i+1:2d}/attempt {attempt+1}: ACK  {resp!r}")
+                # Wait for TIM14 to finish the SENT frame before next submit
+                time.sleep(SENT_FRAME_US / 1_000_000 + 0.001)
+                break
+            else:
+                rejected += 1
+                print(f"    Frame {i+1:2d}/attempt {attempt+1}: NACK {resp!r} — retrying in 2ms")
+                time.sleep(0.002)
+        else:
+            print(f"    Frame {i+1:2d}: gave up after 20 attempts")
+
+    print(f"\n    TX summary: {accepted} accepted, {rejected} total NACKs across {N_FRAMES} frames")
+
+    # Give COM9 1 second to flush decoded frames
     time.sleep(1.0)
     rx_data = s9.read(s9.in_waiting or 2048)
     raw_str = rx_data.decode(errors='replace')
@@ -129,9 +164,13 @@ def main():
     if raw_str.strip():
         frames_510 = [f for f in raw_str.split('\r') if f.startswith('t510')]
         all_items  = [f for f in raw_str.split('\r') if f.strip()]
-        print(f"    COM9 output ({len(all_items)} lines, {len(frames_510)} t510 frames):")
+        print(f"\n    COM9 output ({len(all_items)} lines, {len(frames_510)} t510 frames):")
         for f in all_items[:20]:
             print(f"    {f!r}")
+        if len(frames_510) == N_FRAMES:
+            print(f"\n    ✓ All {N_FRAMES}/{N_FRAMES} frames received!")
+        else:
+            print(f"\n    ✗ Only {len(frames_510)}/{N_FRAMES} frames received.")
     else:
         print("    COM9 received NOTHING.")
         print("    --> Check: is PA4 (COM8) physically wired to PA2 (COM9)?")

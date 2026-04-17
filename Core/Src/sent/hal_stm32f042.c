@@ -263,33 +263,15 @@ uint32_t sent_stm32f042_rx_dropped_batches(const sent_stm32f042_rx_hal_t* hal) {
     return hal->dropped_batches;
 }
 
-/* Return number of entries in the circular TX queue.
- * @param head  queue head index
- * @param tail  queue tail index
- * @return      number of queued entries */
-static size_t tx_queue_count(uint8_t head, uint8_t tail) {
-    if (head >= tail) {
-        return (size_t)(head - tail);
-    }
-    return (size_t)((SENT_STM32F042_TX_QUEUE_DEPTH - tail) + head);
-}
-
-/* Start STM32 TX HAL: validate config and reset queue state.
+/* Start STM32 TX HAL: reset state.
  * @param context  sent_stm32f042_tx_hal_t pointer
- * @return         true if config is valid and HAL started */
+ * @return         always true */
 static bool stm32_tx_start(void* context) {
     sent_stm32f042_tx_hal_t* hal = (sent_stm32f042_tx_hal_t*)context;
     SENT_ASSERT(hal != NULL);
 
-    if (hal->config.max_pending_frames == 0U ||
-        hal->config.max_pending_frames >= SENT_STM32F042_TX_QUEUE_DEPTH) {
-        return false;
-    }
-
-    hal->queue_head = 0U;
-    hal->queue_tail = 0U;
     hal->active_index = 0U;
-    hal->active_count = 0U;
+    hal->count = 0U;
     hal->running = true;
     return true;
 }
@@ -302,12 +284,13 @@ static void stm32_tx_stop(void* context) {
     hal->running = false;
 }
 
-/* Encode a SENT frame into intervals and enqueue for ISR-driven transmission.
+/* Encode a SENT frame into the TX interval buffer for ISR-driven transmission.
+ * Returns false if the previous frame is still in progress or encoding failed.
  * @param context      sent_stm32f042_tx_hal_t pointer
  * @param frame        SENT frame to transmit
  * @param config       SENT protocol configuration
  * @param pause_ticks  pause pulse duration [ticks, 0 = use default]
- * @return             true if enqueued, false if queue full or encoding failed */
+ * @return             true if accepted, false if busy or encoding failed */
 static bool stm32_tx_submit(void* context,
                             const sent_frame_t* frame,
                             const sent_config_t* config,
@@ -318,37 +301,37 @@ static bool stm32_tx_submit(void* context,
         return false;
     }
 
-    uint16_t encoded[SENT_STM32F042_TX_MAX_INTERVALS];
-    size_t encoded_count = 0U;
+    if (hal->active_index < hal->count) {
+        return false;  /* previous frame still in progress */
+    }
+
     uint16_t effective_pause = pause_ticks == 0U ? hal->config.default_pause_ticks : pause_ticks;
-    if (!sent_build_intervals_ticks(frame, config, effective_pause, encoded, &encoded_count)) {
+    uint16_t raw[SENT_STM32F042_TX_MAX_INTERVALS];
+    size_t raw_count = 0U;
+    if (!sent_build_intervals_ticks(frame, config, effective_pause, raw, &raw_count)) {
         return false;
     }
 
-    uint8_t head = hal->queue_head;
-    uint8_t tail = hal->queue_tail;
-    if (tx_queue_count(head, tail) >= hal->config.max_pending_frames) {
-        return false;
+    /* Expand each interval into a LOW-toggle and a HIGH-toggle duration.
+     * The ISR toggles the pin each time its countdown expires, so alternating
+     * entries drive the LOW → HIGH → LOW → ... sequence automatically. */
+    uint8_t low = hal->config.low_ticks;
+    uint8_t n = 0U;
+    for (size_t i = 0U; i < raw_count; ++i) {
+        uint16_t high = (raw[i] > low) ? (uint16_t)(raw[i] - low) : 1U;
+        hal->intervals[n++] = low;
+        hal->intervals[n++] = high;
     }
 
-    uint8_t next_head = queue_next_idx(head, SENT_STM32F042_TX_QUEUE_DEPTH);
-    if (next_head == tail) {
-        return false;
-    }
-
-    sent_stm32f042_tx_frame_intervals_t* slot = &hal->frame_queue[head];
-    slot->count = (uint8_t)encoded_count;
-    for (uint8_t i = 0U; i < slot->count; ++i) {
-        slot->intervals_ticks[i] = encoded[i];
-    }
-
-    hal->queue_head = next_head;
+    hal->active_index = 0U;
+    /* volatile write last: publishes intervals[] to the ISR on M0's in-order store model */
+    hal->count = n;
     return true;
 }
 
 /* Initialize STM32 TX HAL with queue configuration (NULL config uses defaults).
  * @param hal     pointer to TX HAL instance
- * @param config  TX config (max_pending_frames, default_pause_ticks) */
+ * @param config  TX config (default_pause_ticks) */
 void sent_stm32f042_tx_hal_init(sent_stm32f042_tx_hal_t* hal,
                                 const sent_stm32f042_tx_config_t* config) {
     SENT_ASSERT(hal != NULL);
@@ -357,8 +340,8 @@ void sent_stm32f042_tx_hal_init(sent_stm32f042_tx_hal_t* hal,
     if (config != NULL) {
         hal->config = *config;
     } else {
-        hal->config.max_pending_frames = 4U;
         hal->config.default_pause_ticks = 12U;
+        hal->config.low_ticks           = 5U;
     }
 }
 
@@ -374,58 +357,32 @@ void sent_stm32f042_make_tx_hal(sent_stm32f042_tx_hal_t* impl, sent_tx_hal_t* ou
     out_hal->submit_frame = stm32_tx_submit;
 }
 
-/* ISR handler: pop the next TX interval duration, loading next queued frame if needed.
- * Note: does NOT check hal->running so that a frame already queued completes fully even
- * when stop_tx() is called mid-frame (e.g. when switching back to RX mode).  New frames
- * are blocked at submission time (stm32_tx_submit checks running), so the queue drains
- * to empty and the ISR stops naturally once all intervals have been emitted.
+/* ISR handler: pop the next TX interval from the flat interval array.
+ * Does NOT check hal->running so a frame in progress completes fully after stop_tx().
+ * New frames are blocked at submission time (stm32_tx_submit checks running).
  * @param hal                TX HAL instance
  * @param out_interval_ticks [out] next interval duration [timer ticks]
  * @return                   true if an interval was available, false if TX idle */
 bool sent_stm32f042_tx_pop_next_interval_ticks_from_isr(sent_stm32f042_tx_hal_t* hal,
                                                          uint16_t* out_interval_ticks) {
-    SENT_ASSERT(hal != NULL && out_interval_ticks != NULL);
-
     uint8_t index = hal->active_index;
-    uint8_t count = hal->active_count;
-
-    if (index >= count) {
-        uint8_t tail = hal->queue_tail;
-        uint8_t head = hal->queue_head;
-        if (tail == head) {
-            return false;
-        }
-
-        sent_stm32f042_tx_frame_intervals_t* queued = &hal->frame_queue[tail];
-        for (uint8_t i = 0U; i < queued->count; ++i) {
-            hal->active_intervals[i] = queued->intervals_ticks[i];
-        }
-
-        hal->queue_tail = queue_next_idx(tail, SENT_STM32F042_TX_QUEUE_DEPTH);
-        hal->active_count = queued->count;
-        hal->active_index = 0U;
-        index = 0U;
-        count = queued->count;
-    }
-
-    if (index >= count) {
+    if (index >= hal->count) {
         return false;
     }
-
-    *out_interval_ticks = hal->active_intervals[index];
+    *out_interval_ticks = hal->intervals[index];
     hal->active_index = (uint8_t)(index + 1U);
     return true;
 }
 
-/* Return the number of frames pending transmission (queued + active).
+/* Return 1 if a frame is currently being transmitted, 0 if idle.
  * @param hal  TX HAL instance
  * @return     number of pending frames */
 size_t sent_stm32f042_tx_pending_frames(const sent_stm32f042_tx_hal_t* hal) {
     SENT_ASSERT(hal != NULL);
 
-    size_t pending = tx_queue_count(hal->queue_head, hal->queue_tail);
-    if (hal->active_index < hal->active_count) {
-        pending += 1U;
+    size_t pending = 0U;
+    if (hal->active_index < hal->count) {
+        pending = 1U;
     }
     return pending;
 }

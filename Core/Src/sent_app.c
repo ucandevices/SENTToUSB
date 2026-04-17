@@ -67,22 +67,13 @@ static uint16_t g_usb_tx_tail;
  * TIM14 prescaler = 71 → 48 MHz / 72 = 666.67 kHz.
  * ARR = 1 → timer fires every 2 counts → period = 2 × 72 / 48 MHz = 3 µs = 1 SENT tick.
  *
- * Each SENT interval is a two-phase pulse on PA4 (active-LOW):
- *   LOW  phase: PA4 driven LOW for SENT_TX_LOW_TICKS ticks (15 µs).
- *   HIGH phase: PA4 driven HIGH for the remaining (interval − low_ticks) ticks.
- *
- * State machine driven by a simple tick-countdown in the ISR.  No dynamic ARR
- * changes: the timer always fires every 1 tick and the ISR just decrements
- * g_tx_ticks_left.  This eliminates the race between ARR writes and the running
- * counter that caused the HIGH phase to appear too short on a logic analyser.
+ * The TX HAL pre-expands each SENT interval into two toggle durations stored in
+ * hal.intervals[]: [LOW_ticks, HIGH_ticks, LOW_ticks, HIGH_ticks, ...].
+ * Every ISR either decrements the countdown or, when it expires, pops the next
+ * entry and toggles PA4.  No phase variable is needed.
  *
  * SAE J2716 requires the falling edge (LOW) to last at least 5 ticks (15 µs). */
-#define SENT_TX_LOW_TICKS  5U   /* 5 × 3 µs = 15 µs active-LOW pulse */
-
-/* phase: 0 = idle / load next interval, 1 = LOW phase, 2 = HIGH phase */
-static volatile uint8_t  g_tx_phase      = 0U;
-static volatile uint16_t g_tx_ticks_left = 0U;  /* ticks remaining in the current phase */
-static volatile uint16_t g_tx_high_ticks = 0U;  /* HIGH-phase length for the current interval */
+static volatile uint16_t g_tx_ticks_left = 0U;  /* ticks remaining until next toggle */
 
 /* ── USB TX ring helpers ────────────────────────────────────────────────────── */
 
@@ -129,8 +120,7 @@ static void usb_tx_flush(void)
 static void tim14_kick(void)
 {
     if ((htim14.Instance->CR1 & TIM_CR1_CEN) == 0U) {
-        g_tx_phase      = 0U;   /* first ISR will load the first interval */
-        g_tx_ticks_left = 0U;
+        g_tx_ticks_left = 0U;   /* first ISR fires immediately, pops first toggle entry */
         htim14.Instance->CNT    = 0U;
         htim14.Instance->ARR    = 1U;   /* period = 2 counts × 72 / 48 MHz = 3 µs = 1 SENT tick */
         htim14.Instance->SR     = 0U;   /* clear stale UIF so first IRQ is clean */
@@ -199,8 +189,8 @@ void SentApp_Init(void)
 
     /* ── TX HAL ──
      * pause_ticks = 12: pause interval appended after each frame (12 × 3 µs = 36 µs).
-     * max_pending_frames must be < SENT_STM32F042_TX_QUEUE_DEPTH (4) to leave headroom. */
-    sent_stm32f042_tx_config_t tx_cfg = { .default_pause_ticks = 12U, .max_pending_frames = 3U };
+     * low_ticks = 5: 5 × 3 µs = 15 µs active-LOW pulse per interval (SAE J2716 min). */
+    sent_stm32f042_tx_config_t tx_cfg = { .default_pause_ticks = 12U, .low_ticks = 5U };
     sent_stm32f042_tx_hal_init(&g_tx_hal, &tx_cfg);
     sent_tx_hal_t tx_hal;
     sent_stm32f042_make_tx_hal(&g_tx_hal, &tx_hal);
@@ -242,57 +232,27 @@ void SentApp_OnSentRxTimerOverflow(void)
 /* Called from TIM14 update ISR (TIM14_IRQHandler in stm32f0xx_it.c).
  *
  * Fixed-period tick pump: TIM14 fires every 1 SENT tick (3 µs, ARR=0).
- * The ISR drives a 3-state machine via a software countdown:
- *
- *   g_tx_phase = 0  (idle / load)
- *     Pop the next interval from the TX HAL queue.
- *     If the queue is empty: idle PA4 HIGH, stop TIM14.
- *     Otherwise: pull PA4 LOW, load SENT_TX_LOW_TICKS into countdown, → phase 1.
- *
- *   g_tx_phase = 1  (LOW phase)
- *     Decrement countdown.  When it reaches 0: release PA4 HIGH, load HIGH-phase
- *     tick count into countdown, → phase 2.
- *
- *   g_tx_phase = 2  (HIGH phase)
- *     Decrement countdown.  When it reaches 0: → phase 0 (load next interval).
- *
- * Using a fixed ARR (no dynamic ARR changes) eliminates the race between an ARR
- * write and the running counter that caused the HIGH phase to appear too short. */
+ * The TX HAL pre-expands each SENT interval into alternating toggle durations:
+ *   intervals[] = [LOW_ticks, HIGH_ticks, LOW_ticks, HIGH_ticks, ...]
+ * Each time the countdown expires the ISR pops the next duration and toggles PA4.
+ * No phase variable needed — the alternating array encodes direction implicitly. */
 void SentApp_OnTim14UpdateIrq(void)
 {
-    /* Fast path: just count down the current phase */
     if (g_tx_ticks_left > 0U) {
         g_tx_ticks_left--;
         return;
     }
 
-    /* Countdown expired — advance the state machine */
-    if (g_tx_phase == 1U) {
-        /* LOW phase complete: switch PA4 HIGH and start the HIGH phase countdown */
-    	SENT_TX_GPIO_Port->BRR  = SENT_TX_Pin;
-        g_tx_ticks_left = (uint16_t)(g_tx_high_ticks - 1U);
-        g_tx_phase = 2U;
-
-    } else {
-        /* HIGH phase complete (or first ISR after kick): load the next interval */
-        uint16_t ticks;
-        if (!sent_stm32f042_tx_pop_next_interval_ticks_from_isr(&g_tx_hal, &ticks)) {
-            /* Queue exhausted — frame done.  Idle PA4 HIGH and stop TIM14. */
-            SENT_TX_GPIO_Port->BRR  = SENT_TX_Pin;
-            htim14.Instance->CR1  &= ~TIM_CR1_CEN;
-            htim14.Instance->DIER &= ~TIM_IT_UPDATE;
-            return;
-        }
-        /* SAE J2716 minimum interval is 12 ticks > SENT_TX_LOW_TICKS (5), so the
-         * subtraction never underflows with valid frames; clamp defensively. */
-        uint16_t high = (ticks > SENT_TX_LOW_TICKS)
-                      ? (uint16_t)(ticks - SENT_TX_LOW_TICKS)
-                      : 1U;
-        g_tx_high_ticks = high;
-        SENT_TX_GPIO_Port->BSRR = SENT_TX_Pin;       /*TX is reverted by Transistor PA4 LOW — start of interval */
-        g_tx_ticks_left = SENT_TX_LOW_TICKS - 1U;     /* count remaining LOW ticks */
-        g_tx_phase = 1U;
+    uint16_t ticks;
+    if (!sent_stm32f042_tx_pop_next_interval_ticks_from_isr(&g_tx_hal, &ticks)) {
+        /* All toggles done — idle PA4 HIGH and stop TIM14 */
+        SENT_TX_GPIO_Port->BRR  = SENT_TX_Pin;
+        htim14.Instance->CR1  &= ~TIM_CR1_CEN;
+        htim14.Instance->DIER &= ~TIM_IT_UPDATE;
+        return;
     }
+    SENT_TX_GPIO_Port->ODR ^= SENT_TX_Pin;   /* toggle: LOW→HIGH or HIGH→LOW */
+    g_tx_ticks_left = ticks - 1U;
 }
 
 /* Called from USB CDC receive callback (USB interrupt context).
