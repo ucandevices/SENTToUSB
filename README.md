@@ -52,8 +52,8 @@ Host ──SLCAN 't' frame──► USB CDC RX callback (ISR context)
                 Repeat until queue empty → PA4 idle HIGH, TIM14 stops
 ```
 
-- TIM14 prescaler 143 → **1 tick = 3 µs** (1 SENT tick at standard rate).
-- Each SENT interval = 15 µs active-LOW pulse + HIGH for `(N − 5)` ticks.
+- TIM14 is reprogrammed on each TX kick: PSC = 0, ARR = (48 MHz × tick_us) − 1.  Default **1 tick = 3 µs**; the host can change the TX tick period at runtime (see SLCAN `SET_TX_TICK` below).
+- Each SENT interval = `low_ticks` active-LOW pulse (5 ticks, SAE J2716 minimum) + HIGH for `(N − 5)` ticks.
 - The bridge builds the full interval sequence (sync 56T + status + nibbles + CRC + 12T pause) and pushes it to the TX HAL.  The ISR drains it without any main-loop involvement.
 
 Switch to TX mode and send one frame:
@@ -76,14 +76,20 @@ t52050100123456\r         transmit: status=1, nibbles [1,2,3,4,5,6]
 | `F\r` | Status flags |
 | `t<ID><DLC><data>\r` | Send CAN frame |
 
-**Control frames (CAN ID 0x600, DLC = 1):**
+**Control frames (CAN ID 0x600):**
 
-| data[0] | Action |
-|---------|--------|
-| `01` | Start RX |
-| `02` | Start TX |
-| `03` | Stop |
-| `04` | Learn tick period / nibble count / CRC mode from live signal |
+| data[0] | DLC | Action |
+|---------|-----|--------|
+| `01` | 1 | Start RX |
+| `02` | 1 | Start TX |
+| `03` | 1 | Stop |
+| `04` | 1 | Learn tick period / nibble count / CRC mode from live signal |
+| `05` | 3 | Set TX tick period: `data[1..2]` = `tick_x10_us` (little-endian, 0.1 µs units; valid range 20–900, i.e. 2.0–90.0 µs) |
+
+Example — set TX tick to 5.0 µs (`tick_x10_us` = 50 = `0x0032`):
+```
+t60030532 00\r  →  t6003053200\r
+```
 
 **TX data frame (CAN ID 0x520):**
 ```
@@ -154,7 +160,7 @@ set CLI=C:\ST\STM32CubeIDE_1.19.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.
 
 **Step 1** — trigger DFU from the running device (replace `COM8` with your port):
 ```
-python -c "import serial,time; s=serial.Serial('COM8',115200,timeout=1); s.write(b'B\r'); time.sleep(0.3); s.close()"
+python -c "import serial,time; s=serial.Serial('COM8',115200,timeout=1); s.write(b'boot\r'); time.sleep(0.3); s.close()"
 ```
 
 **Step 2** — flash (~3 s after step 1, once the device enumerates as DFU):
@@ -162,5 +168,5 @@ python -c "import serial,time; s=serial.Serial('COM8',115200,timeout=1); s.write
 %CLI% -c port=USB1 -w Debug/SENTToUSB.elf -v -hardRst
 ```
 
-The `B` command writes a magic value (`0xDEADBEEF`) to a `.noinit` RAM variable and resets.
+The `boot` command writes a magic value (`0xDEADBEEF`) to a `.noinit` RAM variable and resets.
 On the next boot the firmware detects the magic, clears it, and jumps to the STM32F042 ROM bootloader at `0x1FFFC400`.

@@ -45,11 +45,38 @@ static void bridge_sync_rx_batch_size(sent_bridge_t* b) {
     }
 }
 
+/* Derive the sync-detection threshold from the configured tick range.
+ * A SENT sync pulse is 56 ticks; the longest data nibble is 27 ticks.  Pick the
+ * midpoint between the longest nibble (at max tick) and the shortest sync
+ * (at min tick) so sync > sync_min_us > every nibble, across the whole range.
+ * Returns 0 if the range is too wide to distinguish — caller must then leave
+ * the HAL's existing threshold unchanged. */
+static uint32_t bridge_derive_sync_min_us(const sent_config_t* cfg) {
+    uint32_t upper_x10 = 56U * (uint32_t)cfg->min_tick_x10_us;  /* shortest sync [us×10] */
+    uint32_t lower_x10 = 27U * (uint32_t)cfg->max_tick_x10_us;  /* longest nibble [us×10] */
+    if (upper_x10 <= lower_x10) {
+        return 0U;
+    }
+    return (upper_x10 + lower_x10) / 20U;
+}
+
+static void bridge_sync_rx_sync_min_us(sent_bridge_t* b) {
+    if (!b->has_rx_hal || b->rx_hal.set_sync_min_us == NULL) {
+        return;
+    }
+    uint32_t sync_min_us = bridge_derive_sync_min_us(&b->config);
+    if (sync_min_us == 0U) {
+        return;  /* range too wide — keep whatever the app initialised */
+    }
+    b->rx_hal.set_sync_min_us(b->rx_hal.context, sync_min_us);
+}
+
 static bool bridge_start_rx(sent_bridge_t* b) {
     if (!b->has_rx_hal || b->rx_hal.start_rx == NULL) {
         return true;
     }
     bridge_sync_rx_batch_size(b);
+    bridge_sync_rx_sync_min_us(b);
     return b->rx_hal.start_rx(b->rx_hal.context);
 }
 
@@ -170,6 +197,20 @@ static bool handle_cmd_stop(sent_bridge_t* b) {
     b->learn.active = false;
     sent_mode_manager_stop(&b->mode_manager);
     return true;
+}
+
+/* Set TX tick period on the TX HAL.
+ * tick_x10_us is validated against SENT_BRIDGE_LEARN_{MIN,MAX}_TICK_X10 so the
+ * host cannot program TIM14 faster than the ISR can service. */
+static bool handle_cmd_set_tx_tick(sent_bridge_t* b, uint16_t tick_x10_us) {
+    if (tick_x10_us < SENT_BRIDGE_LEARN_MIN_TICK_X10 ||
+        tick_x10_us > SENT_BRIDGE_LEARN_MAX_TICK_X10) {
+        return false;
+    }
+    if (!b->has_tx_hal || b->tx_hal.set_tick_x10_us == NULL) {
+        return false;
+    }
+    return b->tx_hal.set_tick_x10_us(b->tx_hal.context, tick_x10_us);
 }
 
 static bool handle_cmd_learn_tick(sent_bridge_t* b) {
@@ -337,6 +378,7 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
         }
         bridge->config_valid = sent_validate_config(&bridge->config);
         bridge_sync_rx_batch_size(bridge);
+        bridge_sync_rx_sync_min_us(bridge);
         response_push(out_responses, frame_ack_line(bridge->config_valid, frame->extended));
         return true;
     }
@@ -353,6 +395,9 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
             ok = handle_cmd_stop(bridge);
         } else if (command == SENT_BRIDGE_CMD_LEARN_TICK) {
             ok = handle_cmd_learn_tick(bridge);
+        } else if (command == SENT_BRIDGE_CMD_SET_TX_TICK && frame->dlc >= 3U) {
+            uint16_t tick = (uint16_t)frame->data[1] | ((uint16_t)frame->data[2] << 8U);
+            ok = handle_cmd_set_tx_tick(bridge, tick);
         } else {
             ok = false;
         }

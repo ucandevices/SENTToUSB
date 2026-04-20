@@ -20,7 +20,7 @@ if not exist "%CUBE%" (
 
 echo Triggering USB DFU bootloader on %PORT%...
 
-powershell -NoProfile -Command "Start-Sleep -Seconds 1; $p = New-Object System.IO.Ports.SerialPort '%PORT%',115200,'None',8,'One'; $p.Open(); $p.Write('b'); Start-Sleep -Milliseconds 100; $p.Close();"
+powershell -NoProfile -Command "Start-Sleep -Seconds 1; $p = New-Object System.IO.Ports.SerialPort '%PORT%',115200,'None',8,'One'; $p.Open(); $p.Write(\"boot`r\"); Start-Sleep -Milliseconds 100; $p.Close();"
 if errorlevel 1 (
   echo ERROR: Failed to send bootloader trigger on %PORT%.
   pause

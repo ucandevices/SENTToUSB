@@ -56,6 +56,7 @@ typedef struct {
 typedef struct {
     uint16_t default_pause_ticks;
     uint8_t  low_ticks;   /* LOW-phase duration per interval [ticks]; SAE J2716 min = 5 */
+    uint16_t tx_tick_x10_us;  /* TX tick period [0.1 us units]; 30 = 3.0 us (SAE J2716 default) */
 } sent_stm32f042_tx_config_t;
 
 typedef struct {
@@ -84,6 +85,7 @@ uint32_t sent_stm32f042_rx_dropped_batches(const sent_stm32f042_rx_hal_t* hal);
 bool sent_stm32f042_tx_pop_next_interval_ticks_from_isr(sent_stm32f042_tx_hal_t* hal,
                                                          uint16_t* out_interval_ticks);
 size_t sent_stm32f042_tx_pending_frames(const sent_stm32f042_tx_hal_t* hal);
+uint16_t sent_stm32f042_tx_get_tick_x10_us(const sent_stm32f042_tx_hal_t* hal);
 
 #ifdef __cplusplus
 }

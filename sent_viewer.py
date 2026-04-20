@@ -490,6 +490,15 @@ class SentMonitor:
                           (can_id >> 8) & 0xFF, can_id & 0xFF])
             slcan = "t001" + "7" + data.hex().upper() + "\r"
             self._send(slcan.encode("ascii"))
+
+            # SET_TX_TICK (control frame 0x600, data[0]=0x05, data[1..2]=tick_x10_us LE).
+            # The 0x001 config frame above only configures RX validation; TX timing
+            # is a separate HAL setting and must be pushed explicitly.
+            tick_x10 = int(round(tick * 10.0))
+            tick_x10 = max(20, min(tick_x10, 900))  # device range: 2.0-90.0 us
+            tx_tick_data = bytes([0x05, tick_x10 & 0xFF, (tick_x10 >> 8) & 0xFF])
+            tx_tick_slcan = "t600" + "3" + tx_tick_data.hex().upper() + "\r"
+            self._send(tx_tick_slcan.encode("ascii"))
         except (ValueError, TypeError):
             pass
 
@@ -651,8 +660,12 @@ class SentMonitor:
             now = time.monotonic()
             while True:
                 line = self.rx_queue.get_nowait()
-                if re.match(r'^t[0-9A-Fa-f]', line):
-                    self.frame_count += 1
+                if re.match(r'^t511', line):
+                    # Diagnostic frame from firmware: authoritative counter values.
+                    # data[0..3]=frames_decoded LE32, data[4..5]=crc LE16, data[6..7]=sync LE16.
+                    self._parse_diag_line(line)
+                    self._append_log(line)
+                elif re.match(r'^t[0-9A-Fa-f]', line):
                     self._frame_times.append(now)
                     if drop:
                         last_data = line   # keep only newest
@@ -669,6 +682,8 @@ class SentMonitor:
         self._frame_times = [t for t in self._frame_times if now - t <= 2.0]
         rate = len(self._frame_times) / 2.0
         self.sv_frames.set(f"Frames: {self.frame_count}")
+        self.sv_crc.set(f"CRC Errors: {self.crc_errors}")
+        self.sv_sync.set(f"Sync Errors: {self.sync_errors}")
         self.sv_rate.set(f"Rate: {rate:.1f} fps")
 
         if drop:
@@ -678,6 +693,29 @@ class SentMonitor:
             for frame in pending_data:
                 self._process_line(frame)
         self.root.after(self.POLL_MS, self._poll_queue)
+
+    def _parse_diag_line(self, line: str):
+        """Sync local counters to firmware stats from a 0x511 diag frame.
+
+        Layout: data[0..3]=frames_decoded LE32, data[4..5]=crc LE16,
+                data[6..7]=sync LE16. DLC must be 8.
+        """
+        fm = re.match(r'^t511([0-9A-Fa-f])([0-9A-Fa-f]*)', line)
+        if not fm:
+            return
+        try:
+            dlc = int(fm.group(1), 16)
+        except ValueError:
+            return
+        if dlc < 8 or len(fm.group(2)) < 16:
+            return
+        try:
+            data = bytes.fromhex(fm.group(2)[:16])
+        except ValueError:
+            return
+        self.frame_count = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24)
+        self.crc_errors  = data[4] | (data[5] << 8)
+        self.sync_errors = data[6] | (data[7] << 8)
 
     def _process_line(self, line: str):
         self._append_log(line)

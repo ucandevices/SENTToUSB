@@ -195,6 +195,17 @@ static void stm32_rx_set_data_nibbles(void* context, uint8_t data_nibbles) {
     hal->active_count = 0U;
 }
 
+/* Update sync-detection threshold.  Safe to call while RX is running: uint32_t
+ * writes are atomic on Cortex-M0 and the ISR reads the new value on the next
+ * edge.  Resets active_count to discard any partial batch aligned to the old
+ * threshold. */
+static void stm32_rx_set_sync_min_us(void* context, uint32_t sync_min_us) {
+    sent_stm32f042_rx_hal_t* hal = (sent_stm32f042_rx_hal_t*)context;
+    SENT_ASSERT(hal != NULL);
+    hal->config.sync_min_us = sync_min_us;
+    hal->active_count = 0U;
+}
+
 /* Wire STM32 RX HAL implementation into the generic RX HAL interface.
  * @param impl     STM32 RX HAL instance
  * @param out_hal  [out] generic RX HAL function-pointer struct to populate */
@@ -206,6 +217,7 @@ void sent_stm32f042_make_rx_hal(sent_stm32f042_rx_hal_t* impl, sent_rx_hal_t* ou
     out_hal->stop_rx = stm32_rx_stop;
     out_hal->poll_timestamps_us = stm32_rx_poll;
     out_hal->set_data_nibbles = stm32_rx_set_data_nibbles;
+    out_hal->set_sync_min_us = stm32_rx_set_sync_min_us;
 }
 
 /* ISR handler: process a captured falling-edge counter value, convert to timestamp.
@@ -355,6 +367,28 @@ void sent_stm32f042_tx_hal_init(sent_stm32f042_tx_hal_t* hal,
         hal->config.default_pause_ticks = 12U;
         hal->config.low_ticks           = 5U;
     }
+    if (hal->config.tx_tick_x10_us == 0U) {
+        hal->config.tx_tick_x10_us = 30U;  /* SAE J2716 default: 3.0 us */
+    }
+}
+
+/* Set the TX tick period.  Stored in config; the sent_app TIM14 driver reads it
+ * from hal->config.tx_tick_x10_us when starting a new burst (tim14_kick).  The
+ * caller must not change the tick while a TX burst is in flight — set between
+ * frames only.  Valid range: 1..65535 (0.1 us units).  Returns true on success. */
+static bool stm32_tx_set_tick_x10_us(void* context, uint16_t tick_x10_us) {
+    sent_stm32f042_tx_hal_t* hal = (sent_stm32f042_tx_hal_t*)context;
+    SENT_ASSERT(hal != NULL);
+    if (tick_x10_us == 0U) {
+        return false;
+    }
+    hal->config.tx_tick_x10_us = tick_x10_us;
+    return true;
+}
+
+uint16_t sent_stm32f042_tx_get_tick_x10_us(const sent_stm32f042_tx_hal_t* hal) {
+    SENT_ASSERT(hal != NULL);
+    return hal->config.tx_tick_x10_us;
 }
 
 /* Wire STM32 TX HAL implementation into the generic TX HAL interface.
@@ -367,6 +401,7 @@ void sent_stm32f042_make_tx_hal(sent_stm32f042_tx_hal_t* impl, sent_tx_hal_t* ou
     out_hal->start_tx = stm32_tx_start;
     out_hal->stop_tx = stm32_tx_stop;
     out_hal->submit_frame = stm32_tx_submit;
+    out_hal->set_tick_x10_us = stm32_tx_set_tick_x10_us;
 }
 
 /* ISR handler: pop the next TX interval from the flat interval array.

@@ -28,6 +28,7 @@ extern "C" {
 #define SENT_BRIDGE_CMD_START_TX   0x02U
 #define SENT_BRIDGE_CMD_STOP       0x03U
 #define SENT_BRIDGE_CMD_LEARN_TICK 0x04U
+#define SENT_BRIDGE_CMD_SET_TX_TICK 0x05U  /* data[1..2] = tick_x10_us little-endian */
 
 /* Tick range used during learn mode: covers the full SENT spec (2-90 us tick). */
 #define SENT_BRIDGE_LEARN_MIN_TICK_X10 20U

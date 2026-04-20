@@ -20,6 +20,7 @@
  *   data[0] = 0x01  Start RX mode
  *   data[0] = 0x02  Start TX mode
  *   data[0] = 0x04  Learn tick period from next sync pulse
+ *   data[0] = 0x05  Set TX tick period (data[1..2] = tick_x10_us, little-endian)
  *
  * SENT TX frames use CAN ID 0x100 (SENT_CAN_ID_SENT_DATA):
  *   data[0]     = status nibble
@@ -62,17 +63,27 @@ static uint8_t  g_usb_tx[USB_TX_BUF_SIZE];
 static uint16_t g_usb_tx_head;
 static uint16_t g_usb_tx_tail;
 
+/* ── Diagnostic counter snapshot (0x511 emission) ───────────────────────────
+ * Last-emitted stats values.  A 0x511 diag frame is pushed to the host whenever
+ * any of these change, so the viewer's CRC/sync error counters stay in sync
+ * with the firmware without needing a host-initiated poll. */
+static uint32_t g_last_frames_decoded = 0U;
+static uint32_t g_last_crc_errors     = 0U;
+static uint32_t g_last_sync_errors    = 0U;
+
 /* ── TX ISR state ───────────────────────────────────────────────────────────
  *
- * TIM14 prescaler = 71 → 48 MHz / 72 = 666.67 kHz.
- * ARR = 1 → timer fires every 2 counts → period = 2 × 72 / 48 MHz = 3 µs = 1 SENT tick.
+ * TIM14 is programmed at kick-time (tim14_kick) with PSC = 0 and
+ *   ARR = (48 MHz × tick_us) - 1
+ * so the update event fires every 1 SENT tick at the currently configured
+ * tick period (default 3.0 µs, host-settable over SLCAN).
  *
  * The TX HAL pre-expands each SENT interval into two toggle durations stored in
  * hal.intervals[]: [LOW_ticks, HIGH_ticks, LOW_ticks, HIGH_ticks, ...].
  * Every ISR either decrements the countdown or, when it expires, pops the next
  * entry and toggles PA4.  No phase variable is needed.
  *
- * SAE J2716 requires the falling edge (LOW) to last at least 5 ticks (15 µs). */
+ * SAE J2716 requires the falling edge (LOW) to last at least 5 ticks. */
 static volatile uint16_t g_tx_ticks_left = 0U;  /* ticks remaining until next toggle */
 
 /* ── USB TX ring helpers ────────────────────────────────────────────────────── */
@@ -109,21 +120,40 @@ static void usb_tx_flush(void)
 
 /* ── TIM14 control ──────────────────────────────────────────────────────────── */
 
+/* TIM14 clock is APB1 × 1 = 48 MHz.  Shared with the rest of the system
+ * (matches SystemCoreClock); captured here as a constant rather than queried
+ * at runtime to keep the kick path lean. */
+#define TIM14_CLOCK_HZ 48000000U
+
 /* Kick TIM14 to start transmitting queued frames.
  * No-op if the timer is already running (TIM_CR1_CEN set).
  * Direct register access bypasses HAL's TIM state machine, which stays BUSY
  * after HAL_TIM_Base_Start_IT and blocks re-entry via the HAL API.
  *
- * ARR = 0: timer fires every 1 SENT tick (3 µs).  The ISR uses a software
- * countdown (g_tx_ticks_left) instead of dynamic ARR changes, which avoids
- * races between ARR writes and the running counter. */
+ * TIM14 is programmed with PSC=0 and ARR = (48e6 * tick_us) - 1, so the update
+ * event fires every 1 SENT tick at the currently configured tick period.  The
+ * ISR uses a software countdown (g_tx_ticks_left) instead of dynamic ARR
+ * changes, which avoids races between ARR writes and the running counter.
+ *
+ * EGR|=UG forces the prescaler reload immediately (PSC writes normally latch
+ * only on the next update event).  The UG pulse also sets UIF, so SR is
+ * cleared afterwards to keep the first real IRQ clean. */
 static void tim14_kick(void)
 {
     if ((htim14.Instance->CR1 & TIM_CR1_CEN) == 0U) {
+        uint16_t tick_x10 = sent_stm32f042_tx_get_tick_x10_us(&g_tx_hal);
+        if (tick_x10 == 0U) { tick_x10 = 30U; }
+        uint32_t cycles = ((uint32_t)(TIM14_CLOCK_HZ / 1000000U) * (uint32_t)tick_x10) / 10U;
+        if (cycles < 2U)     { cycles = 2U; }
+        if (cycles > 65536U) { cycles = 65536U; }
+
         g_tx_ticks_left = 0U;   /* first ISR fires immediately, pops first toggle entry */
+        htim14.Instance->CR1   &= ~TIM_CR1_CEN;
+        htim14.Instance->PSC    = 0U;
+        htim14.Instance->ARR    = (uint16_t)(cycles - 1U);
         htim14.Instance->CNT    = 0U;
-        htim14.Instance->ARR    = 1U;   /* period = 2 counts × 72 / 48 MHz = 3 µs = 1 SENT tick */
-        htim14.Instance->SR     = 0U;   /* clear stale UIF so first IRQ is clean */
+        htim14.Instance->EGR    = TIM_EGR_UG;   /* latch PSC + ARR immediately */
+        htim14.Instance->SR     = 0U;           /* clear UIF pulse from UG */
         htim14.Instance->DIER  |= TIM_IT_UPDATE;
         htim14.Instance->CR1   |= TIM_CR1_CEN;
     }
@@ -188,9 +218,15 @@ void SentApp_Init(void)
     sent_stm32f042_make_rx_hal(&g_rx_hal, &rx_hal);
 
     /* ── TX HAL ──
-     * pause_ticks = 12: pause interval appended after each frame (12 × 3 µs = 36 µs).
-     * low_ticks = 5: 5 × 3 µs = 15 µs active-LOW pulse per interval (SAE J2716 min). */
-    sent_stm32f042_tx_config_t tx_cfg = { .default_pause_ticks = 12U, .low_ticks = 5U };
+     * pause_ticks = 12: pause interval appended after each frame (12 × tick).
+     * low_ticks   = 5 : SAE J2716 minimum active-LOW pulse (5 ticks).
+     * tx_tick_x10_us = 30: default 3.0 µs/tick.  Host may override at runtime
+     *                      via control frame 0x600 data[0]=0x05 (SET_TX_TICK). */
+    sent_stm32f042_tx_config_t tx_cfg = {
+        .default_pause_ticks = 12U,
+        .low_ticks           = 5U,
+        .tx_tick_x10_us      = 30U,
+    };
     sent_stm32f042_tx_hal_init(&g_tx_hal, &tx_cfg);
     sent_tx_hal_t tx_hal;
     sent_stm32f042_make_tx_hal(&g_tx_hal, &tx_hal);
@@ -231,8 +267,9 @@ void SentApp_OnSentRxTimerOverflow(void)
 
 /* Called from TIM14 update ISR (TIM14_IRQHandler in stm32f0xx_it.c).
  *
- * Fixed-period tick pump: TIM14 fires every 1 SENT tick (3 µs, ARR=0).
- * The TX HAL pre-expands each SENT interval into alternating toggle durations:
+ * Fixed-period tick pump: TIM14 fires every 1 SENT tick at the configured
+ * tick period (default 3 µs, set via SLCAN SET_TX_TICK).  The TX HAL
+ * pre-expands each SENT interval into alternating toggle durations:
  *   intervals[] = [LOW_ticks, HIGH_ticks, LOW_ticks, HIGH_ticks, ...]
  * Each time the countdown expires the ISR pops the next duration and toggles PA4.
  * No phase variable needed — the alternating array encodes direction implicitly. */
@@ -288,6 +325,45 @@ void SentApp_OnUsbRx(const uint8_t *data, uint32_t len)
  * TX path: managed entirely by TIM14 ISR + dispatch_slcan_line(); nothing to do here.
  *
  * USB flush: attempts to send the next contiguous ring-buffer segment to the host. */
+/* Emit a diagnostic CAN frame (ID 0x511, DLC=8) when any counter changes.
+ * Layout: data[0..3] = frames_decoded LE32, data[4..5] = crc_errors LE16,
+ *         data[6..7] = sync_errors LE16.  Serialised as a SLCAN 't' line. */
+static void emit_diag_if_changed(void)
+{
+    uint32_t frames = g_bridge.mode_manager.stats.frames_decoded;
+    uint32_t crc    = g_bridge.mode_manager.stats.crc_errors;
+    uint32_t sync   = g_bridge.mode_manager.stats.sync_errors;
+
+    if (frames == g_last_frames_decoded &&
+        crc    == g_last_crc_errors &&
+        sync   == g_last_sync_errors) {
+        return;
+    }
+
+    sent_can_frame_t diag;
+    memset(&diag, 0, sizeof(diag));
+    diag.id       = SENT_CAN_ID_SENT_DIAG;
+    diag.extended = false;
+    diag.dlc      = 8U;
+    diag.data[0]  = (uint8_t)(frames & 0xFFU);
+    diag.data[1]  = (uint8_t)((frames >> 8U)  & 0xFFU);
+    diag.data[2]  = (uint8_t)((frames >> 16U) & 0xFFU);
+    diag.data[3]  = (uint8_t)((frames >> 24U) & 0xFFU);
+    diag.data[4]  = (uint8_t)(crc & 0xFFU);
+    diag.data[5]  = (uint8_t)((crc >> 8U) & 0xFFU);
+    diag.data[6]  = (uint8_t)(sync & 0xFFU);
+    diag.data[7]  = (uint8_t)((sync >> 8U) & 0xFFU);
+
+    char line[SENT_SLCAN_MAX_LINE_LEN + 2U];
+    if (sent_slcan_serialize_frame(&diag, line, sizeof(line))) {
+        usb_tx_push(line, (uint16_t)strlen(line));
+        usb_tx_push("\r", 1U);
+        g_last_frames_decoded = frames;
+        g_last_crc_errors     = crc;
+        g_last_sync_errors    = sync;
+    }
+}
+
 void SentApp_Process(void)
 {
     if (sent_mode_manager_is_rx(&g_bridge.mode_manager)) {
@@ -318,5 +394,6 @@ void SentApp_Process(void)
         }
     }
 
+    emit_diag_if_changed();
     usb_tx_flush();
 }
