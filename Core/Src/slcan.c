@@ -1,7 +1,6 @@
-#include "sent/slcan.h"
+#include "slcan.h"
 
 #include "sent/sent_assert.h"
-#include <string.h>
 
 /* Return length of line excluding trailing CR/LF characters.
  * @param line  null-terminated input string
@@ -83,8 +82,8 @@ static void append_hex(char* out, size_t* cursor, uint32_t value, size_t digits)
 bool sent_slcan_parse_line(const char* line, sent_slcan_command_t* out_command) {
     SENT_ASSERT(line != NULL && out_command != NULL);
 
-    memset(out_command, 0, sizeof(*out_command));
     out_command->type = SENT_SLCAN_CMD_INVALID;
+    out_command->has_frame = false;
 
     size_t len = trim_len(line);
     if (len == 0U) {
@@ -156,7 +155,6 @@ bool sent_slcan_parse_line(const char* line, sent_slcan_command_t* out_command) 
     }
 
     sent_can_frame_t frame;
-    memset(&frame, 0, sizeof(frame));
     frame.id = extended ? (id & 0x1FFFFFFFU) : (id & 0x7FFU);
     frame.extended = extended;
     frame.dlc = dlc;

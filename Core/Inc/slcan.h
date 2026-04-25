@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "sent/can_frame.h"
+#include "can_frame.h"
 
 #ifdef __cplusplus
 extern "C" {

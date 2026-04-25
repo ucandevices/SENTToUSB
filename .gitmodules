@@ -1,0 +1,3 @@
+[submodule "Core/Inc/sent"]
+	path = Core/Inc/sent
+	url = ../open-sent-c

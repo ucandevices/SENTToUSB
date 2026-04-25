@@ -31,10 +31,10 @@
 #include "main.h"
 #include "usbd_cdc_if.h"
 
-#include "sent/bridge.h"
-#include "sent/can_frame.h"
+#include "sent_bridge.h"
+#include "can_frame.h"
 #include "sent/hal_stm32f042.h"
-#include "sent/slcan.h"
+#include "slcan.h"
 #include "sent/sent_protocol.h"
 
 #include <string.h>
@@ -49,6 +49,9 @@ extern TIM_HandleTypeDef htim14;
 static sent_bridge_t           g_bridge;
 static sent_stm32f042_rx_hal_t g_rx_hal;
 static sent_stm32f042_tx_hal_t g_tx_hal;
+
+/* 16-bit serial number derived from MCU UID, returned over SLCAN 'N' command. */
+static uint16_t g_serial_number;
 
 /* SLCAN input line accumulator (filled byte-by-byte from USB RX callback).
  * 64 bytes covers the longest SLCAN frame: 't' + 3-char ID + 1-char DLC + 16 data hex + '\0'. */
@@ -161,17 +164,79 @@ static void tim14_kick(void)
 
 /* ── SLCAN dispatch ─────────────────────────────────────────────────────────── */
 
+/* SLCAN frame ACK: lower-case "z\r" for standard, upper "Z\r" for extended,
+ * BEL ("\a") for nack. Per SLCAN spec. */
+static const char* slcan_frame_ack(bool ok, bool extended)
+{
+    if (!ok) { return "\a"; }
+    return extended ? "Z\r" : "z\r";
+}
+
 /* Parse and act on one complete SLCAN line (no trailing CR/LF).
  * Responses are queued in the USB TX ring buffer for flushing from the main loop. */
 static void dispatch_slcan_line(const char *line)
 {
-    sent_bridge_slcan_responses_t resp;
-    (void)sent_bridge_on_slcan_line(&g_bridge, line, &resp);
+    sent_slcan_command_t parsed;
+    if (!sent_slcan_parse_line(line, &parsed)) {
+        return;
+    }
 
-    /* Forward all response strings produced by the bridge */
-    for (uint8_t i = 0U; i < resp.count; i++) {
-        uint16_t len = (uint16_t)strlen(resp.lines[i]);
-        usb_tx_push(resp.lines[i], len);   /* bridge strings already include \r terminator */
+    const char* resp = NULL;
+    char nbuf[7];
+
+    switch (parsed.type) {
+    case SENT_SLCAN_CMD_OPEN:
+    case SENT_SLCAN_CMD_LISTEN:
+        resp = sent_bridge_start_rx(&g_bridge) ? "\r" : "\a";
+        break;
+    case SENT_SLCAN_CMD_CLOSE:
+        (void)sent_bridge_stop(&g_bridge);
+        resp = "\r";
+        break;
+    case SENT_SLCAN_CMD_SETBAUD:
+        /* SENT/USB CDC: bitrate is irrelevant, always ack */
+        resp = "\r";
+        break;
+    case SENT_SLCAN_CMD_VERSION:
+        resp = "V0101\r";
+        break;
+    case SENT_SLCAN_CMD_FWVERSION:
+        /* uCCBViewer calls .substring(1) on this; must not be empty */
+        resp = "v0101\r";
+        break;
+    case SENT_SLCAN_CMD_SERIAL: {
+        static const char hex[16] = "0123456789ABCDEF";
+        nbuf[0] = 'N';
+        nbuf[1] = hex[(g_serial_number >> 12) & 0xFU];
+        nbuf[2] = hex[(g_serial_number >>  8) & 0xFU];
+        nbuf[3] = hex[(g_serial_number >>  4) & 0xFU];
+        nbuf[4] = hex[(g_serial_number >>  0) & 0xFU];
+        nbuf[5] = '\r';
+        nbuf[6] = '\0';
+        resp = nbuf;
+        break;
+    }
+    case SENT_SLCAN_CMD_STATUS:
+        resp = "F00\r";
+        break;
+    case SENT_SLCAN_CMD_UNSUPPORTED:
+        resp = "\r";
+        break;
+    case SENT_SLCAN_CMD_INVALID:
+        resp = "\a";
+        break;
+    case SENT_SLCAN_CMD_FRAME:
+        if (parsed.has_frame) {
+            bool ok = sent_bridge_on_can_frame(&g_bridge, &parsed.frame);
+            resp = slcan_frame_ack(ok, parsed.frame.extended);
+        } else {
+            resp = "\a";
+        }
+        break;
+    }
+
+    if (resp != NULL) {
+        usb_tx_push(resp, (uint16_t)strlen(resp));
     }
 
     /* If the bridge accepted a TX data frame, start TIM14 if it is idle */
@@ -184,19 +249,23 @@ static void dispatch_slcan_line(const char *line)
 
 void SentApp_Init(void)
 {
-    /* ── SENT configuration ── */
-    /* Default: 3 µs/tick, 6 data nibbles, DATA_ONLY CRC (SAE J2716 APR2016),
-     * pause interval enabled.  The host can override tick period with the
-     * LEARN command (CAN 0x600, data[0]=0x04) after connecting the sensor. */
-    sent_config_t cfg = sent_default_config();
-
-    /* Q12 tick→µs conversion: mul=85 gives 2.996 µs instead of exact 3.000 µs.
-     * A 56-tick sync measures as 167 µs rather than 168 µs.
-     * Lower min_tick to 25 (×0.1 µs = 2.5 µs) so 167/56 = 2.98 µs still passes. */
-    cfg.min_tick_x10_us = 25U;
-
-    /* MLX90377 uses DATA_ONLY CRC (recommended by SAE J2716 APR2016) */
-    cfg.crc_mode = SENT_CRC_MODE_DATA_ONLY;
+    /* ── SENT configuration ──
+     * 3 µs/tick (default), 6 data nibbles, MSB-first, DATA_ONLY CRC with
+     * APR2016 seed (0x03).  The host can override tick period with the
+     * LEARN command (CAN 0x600, data[0]=0x04) after connecting the sensor.
+     *
+     * min_tick_x10_us = 25 (2.5 µs): the Q12 tick→µs conversion uses
+     * mul=85 which yields 2.996 µs instead of exact 3.000 µs, so a 56-tick
+     * sync measures 167 µs rather than 168 µs.  167/56 = 2.98 µs still
+     * passes with min_tick=25. */
+    sent_config_t cfg;
+    cfg.data_nibbles         = 6U;
+    cfg.crc_mode             = SENT_CRC_MODE_DATA_ONLY;
+    cfg.order                = SENT_NIBBLE_ORDER_MSB_FIRST;
+    cfg.pause_pulse_enabled  = false;
+    cfg.min_tick_x10_us      = 25U;
+    cfg.max_tick_x10_us      = 900U;
+    cfg.crc_init_seed        = 0x03U;
 
     /* ── RX HAL ──
      * TIM2 runs at 48 MHz, 16-bit free-running.  PA2 = TIM2_CH3 (AF2), RISING edge.
@@ -241,10 +310,9 @@ void SentApp_Init(void)
     const uint32_t uid1 = *(volatile const uint32_t*)0x1FFFF7B0U;
     const uint32_t uid2 = *(volatile const uint32_t*)0x1FFFF7B4U;
     const uint32_t h32  = uid0 ^ uid1 ^ uid2;
-    g_bridge.serial_number = (uint16_t)(h32 ^ (h32 >> 16U));
+    g_serial_number = (uint16_t)(h32 ^ (h32 >> 16U));
 
-    /* Clear buffers */
-    memset(g_slcan_in, 0, sizeof(g_slcan_in));
+    /* Reset buffer cursors — buffers themselves are BSS (zero-initialised). */
     g_slcan_in_len = 0U;
     g_usb_tx_head  = 0U;
     g_usb_tx_tail  = 0U;
@@ -341,7 +409,6 @@ static void emit_diag_if_changed(void)
     }
 
     sent_can_frame_t diag;
-    memset(&diag, 0, sizeof(diag));
     diag.id       = SENT_CAN_ID_SENT_DIAG;
     diag.extended = false;
     diag.dlc      = 8U;

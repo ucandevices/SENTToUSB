@@ -1,41 +1,10 @@
-#include "sent/bridge.h"
+#include "sent_bridge.h"
 
 #include "sent/sent_assert.h"
 #include <string.h>
 
 #include "sent/sent_decoder.h"
 #include "sent/sent_encoder.h"
-
-/* Append a response line to the SLCAN response buffer.
- * @param out_responses  [in/out] response collection to append to
- * @param line           null-terminated response string
- * @return               true if appended, false if buffer full */
-static bool response_push(sent_bridge_slcan_responses_t* out_responses, const char* line) {
-    SENT_ASSERT(out_responses != NULL && line != NULL);
-    if (out_responses->count >= SENT_BRIDGE_MAX_RESPONSES) {
-        return false;
-    }
-
-    size_t idx = out_responses->count;
-    size_t len = strlen(line);
-    if (len >= sizeof(out_responses->lines[idx])) {
-        return false;
-    }
-
-    for (size_t i = 0U; i < len; ++i) {
-        out_responses->lines[idx][i] = line[i];
-    }
-    out_responses->lines[idx][len] = '\0';
-    out_responses->count++;
-    return true;
-}
-
-/* Return SLCAN frame ACK ("z\r"/"Z\r") or NACK ("\a") per SLCAN spec.
- * Standard frames (t) use "z\r", extended frames (T) use "Z\r". */
-static const char* frame_ack_line(bool ok, bool extended) {
-    if (!ok) { return "\a"; }
-    return extended ? "Z\r" : "z\r";
-}
 
 /* HAL helpers — guard + call, return true if no HAL present (no-op). */
 
@@ -52,8 +21,8 @@ static void bridge_sync_rx_batch_size(sent_bridge_t* b) {
  * Returns 0 if the range is too wide to distinguish — caller must then leave
  * the HAL's existing threshold unchanged. */
 static uint32_t bridge_derive_sync_min_us(const sent_config_t* cfg) {
-    uint32_t upper_x10 = 56U * (uint32_t)cfg->min_tick_x10_us;  /* shortest sync [us×10] */
-    uint32_t lower_x10 = 27U * (uint32_t)cfg->max_tick_x10_us;  /* longest nibble [us×10] */
+    uint32_t upper_x10 = SENT_SYNC_TICKS * (uint32_t)cfg->min_tick_x10_us;        /* shortest sync [us×10] */
+    uint32_t lower_x10 = SENT_NIBBLE_MAX_TICKS * (uint32_t)cfg->max_tick_x10_us;  /* longest nibble [us×10] */
     if (upper_x10 <= lower_x10) {
         return 0U;
     }
@@ -116,7 +85,6 @@ static void pack_rx_can_frame(const sent_frame_t* f,
     uint8_t n = f->data_nibbles_count;
     uint8_t bytes = (n + 1U) / 2U;  /* ceil(n/2) */
 
-    memset(out, 0, sizeof(*out));
     out->id = out_id;
     out->extended = false;
     out->dlc = bytes;
@@ -142,7 +110,6 @@ static bool handle_tx_can_frame(sent_bridge_t* bridge, const sent_can_frame_t* f
     }
 
     sent_frame_t tx_frame;
-    memset(&tx_frame, 0, sizeof(tx_frame));
     tx_frame.status = (uint8_t)(frame->data[0] & 0x0FU);
     tx_frame.data_nibbles_count = bridge->config.data_nibbles;
 
@@ -166,9 +133,10 @@ static bool handle_tx_can_frame(sent_bridge_t* bridge, const sent_can_frame_t* f
     return bridge->tx_hal.submit_frame(bridge->tx_hal.context, &tx_frame, &bridge->config, pause_ticks);
 }
 
-/* Per-command handlers — each returns true on success. */
+/* Public command API — each returns true on success. */
 
-static bool handle_cmd_start_rx(sent_bridge_t* b) {
+bool sent_bridge_start_rx(sent_bridge_t* b) {
+    SENT_ASSERT(b != NULL);
     if (!b->config_valid) {
         return false;
     }
@@ -180,7 +148,8 @@ static bool handle_cmd_start_rx(sent_bridge_t* b) {
     return ok;
 }
 
-static bool handle_cmd_start_tx(sent_bridge_t* b) {
+bool sent_bridge_start_tx(sent_bridge_t* b) {
+    SENT_ASSERT(b != NULL);
     if (!b->config_valid) {
         return false;
     }
@@ -192,7 +161,8 @@ static bool handle_cmd_start_tx(sent_bridge_t* b) {
     return ok;
 }
 
-static bool handle_cmd_stop(sent_bridge_t* b) {
+bool sent_bridge_stop(sent_bridge_t* b) {
+    SENT_ASSERT(b != NULL);
     bridge_stop_all(b);
     b->learn.active = false;
     sent_mode_manager_stop(&b->mode_manager);
@@ -238,7 +208,8 @@ static bool handle_cmd_learn_tick(sent_bridge_t* b) {
 
 /* Initialize bridge with SENT config and RX/TX HAL backends.
  * @param bridge  bridge instance to initialize
- * @param config  SENT protocol configuration (NULL for defaults)
+ * @param config  SENT protocol configuration — required; NULL leaves the
+ *                bridge in an unconfigured state and operations return errors
  * @param rx_hal  RX HAL interface (NULL if RX not used)
  * @param tx_hal  TX HAL interface (NULL if TX not used) */
 void sent_bridge_init(sent_bridge_t* bridge,
@@ -248,8 +219,10 @@ void sent_bridge_init(sent_bridge_t* bridge,
     SENT_ASSERT(bridge != NULL);
 
     memset(bridge, 0, sizeof(*bridge));
-    bridge->config = config != NULL ? *config : sent_default_config();
-    bridge->config_valid = sent_validate_config(&bridge->config);
+    if (config != NULL) {
+        bridge->config = *config;
+        bridge->config_valid = sent_validate_config(&bridge->config);
+    }
     bridge->output_can_id = SENT_CAN_ID_SENT_RX_FRAME;
     sent_mode_manager_init(&bridge->mode_manager);
 
@@ -263,87 +236,13 @@ void sent_bridge_init(sent_bridge_t* bridge,
     }
 }
 
-/* Process an incoming SLCAN command line and produce response lines.
- * @param bridge         bridge instance
- * @param line           null-terminated SLCAN command string
- * @param out_responses  [out] response lines to send back over USB
- * @return               true if command was processed */
-bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
-                               const char* line,
-                               sent_bridge_slcan_responses_t* out_responses) {
-    SENT_ASSERT(bridge != NULL && line != NULL && out_responses != NULL);
-
-    memset(out_responses, 0, sizeof(*out_responses));
-
-    sent_slcan_command_t parsed;
-    if (!sent_slcan_parse_line(line, &parsed)) {
-        return false;
-    }
-
-    /* O / L — open channel: start SENT RX */
-    if (parsed.type == SENT_SLCAN_CMD_OPEN || parsed.type == SENT_SLCAN_CMD_LISTEN) {
-        bool ok = handle_cmd_start_rx(bridge);
-        response_push(out_responses, ok ? "\r" : "\a");
-        return true;
-    }
-    /* C — close channel: stop all activity */
-    if (parsed.type == SENT_SLCAN_CMD_CLOSE) {
-        handle_cmd_stop(bridge);
-        response_push(out_responses, "\r");
-        return true;
-    }
-    /* S/s — set bitrate: irrelevant for USB CDC, always ack */
-    if (parsed.type == SENT_SLCAN_CMD_SETBAUD) {
-        response_push(out_responses, "\r");
-        return true;
-    }
-    /* V — hardware version */
-    if (parsed.type == SENT_SLCAN_CMD_VERSION) {
-        response_push(out_responses, "V0101\r");
-        return true;
-    }
-    /* v — firmware version (uCCBViewer calls .substring(1) on this; must not be empty) */
-    if (parsed.type == SENT_SLCAN_CMD_FWVERSION) {
-        response_push(out_responses, "v0101\r");
-        return true;
-    }
-    /* N — serial number derived from MCU unique ID hash */
-    if (parsed.type == SENT_SLCAN_CMD_SERIAL) {
-        static const char hex[16] = "0123456789ABCDEF";
-        char nbuf[7] = {
-            'N',
-            hex[(bridge->serial_number >> 12) & 0xFU],
-            hex[(bridge->serial_number >>  8) & 0xFU],
-            hex[(bridge->serial_number >>  4) & 0xFU],
-            hex[(bridge->serial_number >>  0) & 0xFU],
-            '\r',
-            '\0'
-        };
-        response_push(out_responses, nbuf);
-        return true;
-    }
-    /* F — read status flags: no errors */
-    if (parsed.type == SENT_SLCAN_CMD_STATUS) {
-        response_push(out_responses, "F00\r");
-        return true;
-    }
-    /* Unknown but syntactically valid commands: ack gracefully */
-    if (parsed.type == SENT_SLCAN_CMD_UNSUPPORTED) {
-        response_push(out_responses, "\r");
-        return true;
-    }
-    /* Malformed / empty line: nack */
-    if (parsed.type == SENT_SLCAN_CMD_INVALID) {
-        response_push(out_responses, "\a");
-        return true;
-    }
-
-    if (!parsed.has_frame) {
-        response_push(out_responses, "\a");
-        return true;
-    }
-
-    const sent_can_frame_t* frame = &parsed.frame;
+/* Process an incoming CAN frame: config (0x001), control (0x600), or TX (0x520).
+ * @param bridge  bridge instance
+ * @param frame   parsed CAN frame
+ * @return        true if the frame was accepted (or ignored as unknown), false on
+ *                a known operation that failed */
+bool sent_bridge_on_can_frame(sent_bridge_t* bridge, const sent_can_frame_t* frame) {
+    SENT_ASSERT(bridge != NULL && frame != NULL);
 
     /* Config frame: ID 0x001, each byte one SENT parameter.
      * byte 0: data nibbles (4, 6, or 8)
@@ -379,40 +278,36 @@ bool sent_bridge_on_slcan_line(sent_bridge_t* bridge,
         bridge->config_valid = sent_validate_config(&bridge->config);
         bridge_sync_rx_batch_size(bridge);
         bridge_sync_rx_sync_min_us(bridge);
-        response_push(out_responses, frame_ack_line(bridge->config_valid, frame->extended));
-        return true;
+        return bridge->config_valid;
     }
 
     if (frame->id == SENT_CAN_ID_SENT_CONTROL && frame->dlc >= 1U) {
         uint8_t command = frame->data[0];
-        bool ok;
 
         if (command == SENT_BRIDGE_CMD_START_RX) {
-            ok = handle_cmd_start_rx(bridge);
-        } else if (command == SENT_BRIDGE_CMD_START_TX) {
-            ok = handle_cmd_start_tx(bridge);
-        } else if (command == SENT_BRIDGE_CMD_STOP) {
-            ok = handle_cmd_stop(bridge);
-        } else if (command == SENT_BRIDGE_CMD_LEARN_TICK) {
-            ok = handle_cmd_learn_tick(bridge);
-        } else if (command == SENT_BRIDGE_CMD_SET_TX_TICK && frame->dlc >= 3U) {
-            uint16_t tick = (uint16_t)frame->data[1] | ((uint16_t)frame->data[2] << 8U);
-            ok = handle_cmd_set_tx_tick(bridge, tick);
-        } else {
-            ok = false;
+            return sent_bridge_start_rx(bridge);
         }
-
-        response_push(out_responses, frame_ack_line(ok, frame->extended));
-        return true;
+        if (command == SENT_BRIDGE_CMD_START_TX) {
+            return sent_bridge_start_tx(bridge);
+        }
+        if (command == SENT_BRIDGE_CMD_STOP) {
+            return sent_bridge_stop(bridge);
+        }
+        if (command == SENT_BRIDGE_CMD_LEARN_TICK) {
+            return handle_cmd_learn_tick(bridge);
+        }
+        if (command == SENT_BRIDGE_CMD_SET_TX_TICK && frame->dlc >= 3U) {
+            uint16_t tick = (uint16_t)frame->data[1] | ((uint16_t)frame->data[2] << 8U);
+            return handle_cmd_set_tx_tick(bridge, tick);
+        }
+        return false;
     }
 
     if (frame->id == SENT_CAN_ID_SENT_TX_FRAME) {
-        bool ok = handle_tx_can_frame(bridge, frame);
-        response_push(out_responses, frame_ack_line(ok, frame->extended));
-        return true;
+        return handle_tx_can_frame(bridge, frame);
     }
 
-    response_push(out_responses, frame_ack_line(true, frame->extended));
+    /* Unknown CAN ID — accept silently (host gets a positive ack from caller). */
     return true;
 }
 
@@ -468,7 +363,6 @@ static bool bridge_try_learn(sent_bridge_t* bridge,
             bridge_stop_rx(bridge);
             sent_mode_manager_stop(&bridge->mode_manager);
 
-            memset(out_can_frame, 0, sizeof(*out_can_frame));
             out_can_frame->id = SENT_CAN_ID_SENT_ACK;
             out_can_frame->extended = false;
             out_can_frame->dlc = 4U;

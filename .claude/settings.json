@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\LJ\\\\STM32CubeIDE\\\\workspace_1.19.0\\\\SENTToUSB\\\\Release && build.bat\")",
-      "Bash(cmd.exe //c \"C:\\\\Users\\\\LJ\\\\STM32CubeIDE\\\\workspace_1.19.0\\\\SENTToUSB\\\\Release\\\\build.bat\")"
-    ]
-  }
-}

@@ -2,6 +2,7 @@
 
 USB CDC (Virtual COM Port) adapter for **SAE J2716 SENT** sensors.
 Talks to the host using the **SLCAN** text protocol over any serial terminal.
+Project is using https://github.com/ucandevices/open-sent-c for SENT implementation.
 
 ---
 
@@ -111,7 +112,6 @@ t5103AABBCC\r    DLC=3, 3 bytes = 6 nibbles packed high-nibble-first
 
 | Script | Purpose |
 |--------|---------|
-| `sent_MLX - Copy.py` | **MLX90377 GUI** — live angle gauge, decoded nibbles, frame log. Connect sensor to PA2, open port in the GUI; data appears automatically. |
 | `sent_viewer.py` | General SLCAN monitor GUI with TX panel and Learn mode |
 | `sent_test.py` | CLI — open port, apply config, print received frames for N seconds |
 | `check_rx.py` | Loopback sanity check: pings COM8 (TX), listens on COM9 (RX) |
@@ -123,12 +123,6 @@ t5103AABBCC\r    DLC=3, 3 bytes = 6 nibbles packed high-nibble-first
 pip install pyserial
 ```
 `verify_sent.py` additionally needs `pip install saleae` and Logic2 running with the automation API enabled (port 10430).
-
-### MLX90377 quick start
-```
-python "sent_MLX - Copy.py"
-```
-Select the COM port, click Connect.  Firmware auto-starts RX on `O\r`; angle and magnitude update live.
 
 ---
 
