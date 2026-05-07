@@ -5,7 +5,7 @@
  *
  *   USB CDC RX  → SLCAN command parser → bridge → TX HAL / RX mode control
  *   TIM2 CH3    → input-capture ISR   → RX HAL  (SENT signal from sensor on PA2)
- *   TIM14       → interval scheduler  → TX HAL  (SENT signal to DUT on PA4)
+ *   TIM3 CH3    → DMA-driven PWM1 output → TX HAL  (SENT signal to DUT on PB0)
  *
  * SLCAN command summary (subset implemented by the bridge):
  *   'O'         Open channel — start SENT RX (enable frame forwarding to host)
@@ -21,6 +21,10 @@
  *   data[0] = 0x02  Start TX mode
  *   data[0] = 0x04  Learn tick period from next sync pulse
  *   data[0] = 0x05  Set TX tick period (data[1..2] = tick_x10_us, little-endian)
+ *
+ * SENT TX uses TIM3_CH3 (PB0, AF1) in PWM Mode 1 with DMA1_Channel3 reloading ARR.
+ * DMA reloads TIM3→ARR from a pre-computed cycle buffer on each timer update,
+ * eliminating the per-interval ISR of the previous TIM14 software approach.
  *
  * SENT TX frames use CAN ID 0x100 (SENT_CAN_ID_SENT_DATA):
  *   data[0]     = status nibble
@@ -41,8 +45,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* TIM14 handle is defined in main.c */
-extern TIM_HandleTypeDef htim14;
+/* TIM3 and DMA handles are defined in main.c */
+extern TIM_HandleTypeDef htim3;
+extern DMA_HandleTypeDef hdma_tim3_up;
 
 /* ── Static state ──────────────────────────────────────────────────────────── */
 
@@ -74,20 +79,25 @@ static uint32_t g_last_frames_decoded = 0U;
 static uint32_t g_last_crc_errors     = 0U;
 static uint32_t g_last_sync_errors    = 0U;
 
-/* ── TX ISR state ───────────────────────────────────────────────────────────
+/* ── TX DMA state ───────────────────────────────────────────────────────────
  *
- * TIM14 is programmed at kick-time (tim14_kick) with PSC = 0 and
- *   ARR = (48 MHz × tick_us) - 1
- * so the update event fires every 1 SENT tick at the currently configured
- * tick period (default 3.0 µs, host-settable over SLCAN).
+ * The TX HAL pre-expands each SENT frame into alternating [LOW_ticks, HIGH_ticks]
+ * pairs in g_tx_hal.intervals[].  tim3_dma_start() folds each pair into a single
+ * total-interval ARR value (LOW+HIGH ticks → cycles−1) IN PLACE, writing the
+ * result back into intervals[0..n_raw-1].  This avoids a separate DMA buffer.
  *
- * The TX HAL pre-expands each SENT interval into two toggle durations stored in
- * hal.intervals[]: [LOW_ticks, HIGH_ticks, LOW_ticks, HIGH_ticks, ...].
- * Every ISR either decrements the countdown or, when it expires, pops the next
- * entry and toggles PA4.  No phase variable is needed.
+ * TIM3_CH3 (PB0, AF1) uses PWM Mode 1 with a fixed CCR3 = low_ticks × cycles_per_tick.
+ * PWM Mode 1: OCxREF=1 when CNT < CCR3 (LOW pulse), OCxREF=0 otherwise (HIGH phase).
+ * Through the gate transistor: OCxREF=1 → PB0 HIGH → transistor ON → SENT bus LOW.
  *
- * SAE J2716 requires the falling edge (LOW) to last at least 5 ticks. */
-static volatile uint16_t g_tx_ticks_left = 0U;  /* ticks remaining until next toggle */
+ * When the mode is switched from FORCED_INACTIVE to PWM1 (with CNT=0 < CCR3), OCxREF
+ * goes HIGH immediately — the SENT bus falling edge (start of the active-LOW pulse)
+ * occurs right at that transition, one ARR=intervals[0] period after which it rises.
+ *
+ * DMA1_Channel3 reloads TIM3→ARR from intervals[1..n_raw-1] on each update event.
+ * When DMA completes, the TC callback arms TIM_IT_UPDATE for one final cleanup event.
+ * SentApp_OnTim3UpdateIrq() stops the counter and returns OC3 to FORCED_INACTIVE
+ * (PB0 LOW → transistor OFF → SENT bus HIGH = idle). */
 
 /* ── USB TX ring helpers ────────────────────────────────────────────────────── */
 
@@ -121,44 +131,98 @@ static void usb_tx_flush(void)
     }
 }
 
-/* ── TIM14 control ──────────────────────────────────────────────────────────── */
+/* ── TIM3 DMA TX control ────────────────────────────────────────────────────── */
 
-/* TIM14 clock is APB1 × 1 = 48 MHz.  Shared with the rest of the system
- * (matches SystemCoreClock); captured here as a constant rather than queried
- * at runtime to keep the kick path lean. */
-#define TIM14_CLOCK_HZ 48000000U
+/* TIM3 clock = APB1 × 1 = 48 MHz (same as SystemCoreClock). */
+#define TIM3_CLOCK_HZ 48000000U
 
-/* Kick TIM14 to start transmitting queued frames.
- * No-op if the timer is already running (TIM_CR1_CEN set).
- * Direct register access bypasses HAL's TIM state machine, which stays BUSY
- * after HAL_TIM_Base_Start_IT and blocks re-entry via the HAL API.
- *
- * TIM14 is programmed with PSC=0 and ARR = (48e6 * tick_us) - 1, so the update
- * event fires every 1 SENT tick at the currently configured tick period.  The
- * ISR uses a software countdown (g_tx_ticks_left) instead of dynamic ARR
- * changes, which avoids races between ARR writes and the running counter.
- *
- * EGR|=UG forces the prescaler reload immediately (PSC writes normally latch
- * only on the next update event).  The UG pulse also sets UIF, so SR is
- * cleared afterwards to keep the first real IRQ clean. */
-static void tim14_kick(void)
+/* DMA transfer-complete callback: all ARR values except the last have been loaded.
+ * Disable the DMA request and arm the TIM3 update interrupt so the final interval
+ * fires SentApp_OnTim3UpdateIrq() for cleanup. */
+static void tim3_tx_dma_complete(DMA_HandleTypeDef *hdma)
 {
-    if ((htim14.Instance->CR1 & TIM_CR1_CEN) == 0U) {
-        uint16_t tick_x10 = sent_stm32f042_tx_get_tick_x10_us(&g_tx_hal);
-        if (tick_x10 == 0U) { tick_x10 = 30U; }
-        uint32_t cycles = ((uint32_t)(TIM14_CLOCK_HZ / 1000000U) * (uint32_t)tick_x10) / 10U;
-        if (cycles < 2U)     { cycles = 2U; }
-        if (cycles > 65536U) { cycles = 65536U; }
+    (void)hdma;
+    TIM3->DIER &= ~TIM_DMA_UPDATE;
+    TIM3->SR    = 0U;               /* clear any pending UIF before enabling IT */
+    TIM3->DIER |= TIM_IT_UPDATE;
+}
 
-        g_tx_ticks_left = 0U;   /* first ISR fires immediately, pops first toggle entry */
-        htim14.Instance->CR1   &= ~TIM_CR1_CEN;
-        htim14.Instance->PSC    = 0U;
-        htim14.Instance->ARR    = (uint16_t)(cycles - 1U);
-        htim14.Instance->CNT    = 0U;
-        htim14.Instance->EGR    = TIM_EGR_UG;   /* latch PSC + ARR immediately */
-        htim14.Instance->SR     = 0U;           /* clear UIF pulse from UG */
-        htim14.Instance->DIER  |= TIM_IT_UPDATE;
-        htim14.Instance->CR1   |= TIM_CR1_CEN;
+/* Start DMA-driven TX for the frame pre-loaded into g_tx_hal.
+ * No-op if the timer is already running.
+ *
+ * Sequence:
+ *   1. Fold each [LOW_ticks, HIGH_ticks] pair into a single total ARR value
+ *      (cycles−1) written back to intervals[0..n_raw-1] in-place.
+ *   2. Set CCR3 = low_ticks × cycles_per_tick (fixed active-LOW pulse width).
+ *   3. Load intervals[0] into TIM3→ARR; set CNT=0.
+ *   4. Arm DMA to transfer intervals[1..n_raw-1] → TIM3→ARR on update events.
+ *   5. Switch to PWM Mode 1 and start the counter.
+ *      PWM1: OCxREF=1 when CNT < CCR3 → PB0 HIGH → transistor ON → SENT bus LOW.
+ *      With CNT=0 < CCR3, OCxREF goes HIGH at the CCMR2 write (bus falls immediately).
+ *
+ * After the last DMA transfer, tim3_tx_dma_complete() enables TIM_IT_UPDATE.
+ * SentApp_OnTim3UpdateIrq() stops the timer and returns OC3 to FORCED_INACTIVE
+ * (PB0 LOW → transistor OFF → SENT bus HIGH = idle). */
+static void tim3_dma_start(void)
+{
+    if (TIM3->CR1 & TIM_CR1_CEN) { return; }   /* already running */
+
+    uint8_t n = g_tx_hal.count;
+    if (n == 0U || (n & 1U)) { return; }        /* must be even (LOW+HIGH pairs) */
+
+    uint8_t n_raw = n >> 1U;                     /* number of complete SENT intervals */
+
+    uint16_t tick_x10 = sent_stm32f042_tx_get_tick_x10_us(&g_tx_hal);
+    if (tick_x10 == 0U) { tick_x10 = 30U; }
+    uint32_t cycles_per_tick = ((TIM3_CLOCK_HZ / 1000000U) * (uint32_t)tick_x10) / 10U;
+    if (cycles_per_tick < 2U) { cycles_per_tick = 2U; }
+
+    uint8_t low_ticks = g_tx_hal.config.low_ticks;
+    if (low_ticks == 0U) { low_ticks = 5U; }
+    uint32_t ccr3 = (uint32_t)low_ticks * cycles_per_tick;
+    if (ccr3 > 65535U) { ccr3 = 65535U; }
+
+    /* Fold [LOW_ticks, HIGH_ticks, ...] pairs into total ARR values in-place.
+     * intervals[i] = (LOW[i] + HIGH[i]) × cycles_per_tick − 1. */
+    for (uint8_t i = 0U; i < n_raw; i++) {
+        uint32_t total = (uint32_t)g_tx_hal.intervals[2U * i] +
+                         (uint32_t)g_tx_hal.intervals[2U * i + 1U];
+        uint32_t c = total * cycles_per_tick;
+        if (c < 2U)     { c = 2U; }
+        if (c > 65536U) { c = 65536U; }
+        g_tx_hal.intervals[i] = (uint16_t)(c - 1U);
+    }
+
+    TIM3->CCR3 = (uint16_t)ccr3;   /* fixed LOW pulse width in cycles */
+    TIM3->ARR  = g_tx_hal.intervals[0];
+    TIM3->CNT  = 0U;
+    TIM3->SR   = 0U;
+
+    /* Arm the DMA channel with the source pointer, but do NOT enable the timer's
+     * UDE bit yet.  If UDE is enabled here while UIF is set (or any stale request
+     * is latched in the DMA controller), DMA fires immediately and consumes
+     * intervals[1] -- overwriting ARR before period 0 even starts, which makes
+     * the sync interval silently disappear. */
+    if (n_raw > 1U) {
+        HAL_DMA_Start_IT(&hdma_tim3_up,
+                          (uint32_t)&g_tx_hal.intervals[1],
+                          (uint32_t)&TIM3->ARR,
+                          (uint32_t)(n_raw - 1U));
+    }
+
+    /* PWM Mode 1: OCxREF=1 when CNT < CCR3.  With CNT=0, OCxREF goes HIGH at the
+     * CCMR2 write → SENT bus LOW (frame start).  Counter starts immediately after. */
+    TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_PWM1;
+    TIM3->CR1  |= TIM_CR1_CEN;
+
+    /* Enable the DMA/IT request AFTER the timer is running.  UIF is guaranteed 0
+     * here (counter just started, hasn't reached ARR yet), so no spurious request
+     * can fire.  The first real UEV at the end of period 0 (= end of sync) is
+     * what triggers the first DMA transfer for intervals[1]. */
+    if (n_raw > 1U) {
+        TIM3->DIER |= TIM_DMA_UPDATE;
+    } else {
+        TIM3->DIER |= TIM_IT_UPDATE;
     }
 }
 
@@ -239,9 +303,9 @@ static void dispatch_slcan_line(const char *line)
         usb_tx_push(resp, (uint16_t)strlen(resp));
     }
 
-    /* If the bridge accepted a TX data frame, start TIM14 if it is idle */
+    /* If the bridge accepted a TX data frame, start DMA TX if idle */
     if (sent_stm32f042_tx_pending_frames(&g_tx_hal) > 0U) {
-        tim14_kick();
+        tim3_dma_start();
     }
 }
 
@@ -303,6 +367,10 @@ void SentApp_Init(void)
     /* ── Bridge ── */
     sent_bridge_init(&g_bridge, &cfg, &rx_hal, &tx_hal);
 
+    /* Register DMA TC callback — called by HAL_DMA_IRQHandler after all ARR values
+     * have been transferred, to arm the final TIM3 update interrupt for cleanup. */
+    hdma_tim3_up.XferCpltCallback = tim3_tx_dma_complete;
+
     /* Derive a 16-bit serial number from the STM32F042 96-bit unique device ID
      * (three 32-bit words at 0x1FFFF7AC–0x1FFFF7B4) by XOR-folding.
      * Used in the SLCAN 'N' response so the host can identify each dongle. */
@@ -333,31 +401,18 @@ void SentApp_OnSentRxTimerOverflow(void)
     sent_stm32f042_rx_on_overflow_isr(&g_rx_hal);
 }
 
-/* Called from TIM14 update ISR (TIM14_IRQHandler in stm32f0xx_it.c).
- *
- * Fixed-period tick pump: TIM14 fires every 1 SENT tick at the configured
- * tick period (default 3 µs, set via SLCAN SET_TX_TICK).  The TX HAL
- * pre-expands each SENT interval into alternating toggle durations:
- *   intervals[] = [LOW_ticks, HIGH_ticks, LOW_ticks, HIGH_ticks, ...]
- * Each time the countdown expires the ISR pops the next duration and toggles PA4.
- * No phase variable needed — the alternating array encodes direction implicitly. */
-void SentApp_OnTim14UpdateIrq(void)
+/* Called from TIM3_IRQHandler (stm32f0xx_it.c) after DMA TC enables TIM_IT_UPDATE.
+ * This fires exactly once per transmitted frame — after the last interval completes.
+ * Stops the counter and returns TIM3_CH3 to forced-inactive so PB0 stays LOW (idle). */
+void SentApp_OnTim3UpdateIrq(void)
 {
-    if (g_tx_ticks_left > 0U) {
-        g_tx_ticks_left--;
-        return;
-    }
-
-    uint16_t ticks;
-    if (!sent_stm32f042_tx_pop_next_interval_ticks_from_isr(&g_tx_hal, &ticks)) {
-        /* All toggles done — idle PA4 HIGH and stop TIM14 */
-        SENT_TX_GPIO_Port->BRR  = SENT_TX_Pin;
-        htim14.Instance->CR1  &= ~TIM_CR1_CEN;
-        htim14.Instance->DIER &= ~TIM_IT_UPDATE;
-        return;
-    }
-    SENT_TX_GPIO_Port->ODR ^= SENT_TX_Pin;   /* toggle: LOW→HIGH or HIGH→LOW */
-    g_tx_ticks_left = ticks - 1U;
+    TIM3->CR1  &= ~TIM_CR1_CEN;
+    TIM3->DIER &= ~TIM_IT_UPDATE;
+    /* Forced-inactive: OCxREF = 0 → PB0 LOW → gate transistor OFF → SENT bus HIGH (idle). */
+    TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_FORCED_INACTIVE;
+    /* Release the TX HAL so the next frame can be submitted */
+    g_tx_hal.count        = 0U;
+    g_tx_hal.active_index = 0U;
 }
 
 /* Called from USB CDC receive callback (USB interrupt context).
@@ -390,7 +445,7 @@ void SentApp_OnUsbRx(const uint8_t *data, uint32_t len)
  *   decodes each batch into a SENT frame, serialises as a SLCAN 't' line, and queues
  *   it in the USB TX ring buffer.
  *
- * TX path: managed entirely by TIM14 ISR + dispatch_slcan_line(); nothing to do here.
+ * TX path: managed entirely by TIM3 DMA + dispatch_slcan_line(); nothing to do here.
  *
  * USB flush: attempts to send the next contiguous ring-buffer segment to the host. */
 /* Emit a diagnostic CAN frame (ID 0x511, DLC=8) when any counter changes.

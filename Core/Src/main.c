@@ -43,7 +43,8 @@
 
 /* Private variables ---------------------------------------------------------*/
 TIM_HandleTypeDef htim2;
-TIM_HandleTypeDef htim14;
+TIM_HandleTypeDef htim3;
+DMA_HandleTypeDef hdma_tim3_up;
 
 /* USER CODE BEGIN PV */
 __attribute__((section(".noinit"), used)) volatile uint32_t dfu_magic;
@@ -53,7 +54,7 @@ __attribute__((section(".noinit"), used)) volatile uint32_t dfu_magic;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_TIM2_Init(void);
-static void MX_TIM14_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -164,7 +165,7 @@ int main(void)
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   MX_TIM2_Init();
-  MX_TIM14_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   SentApp_Init();
 
@@ -172,12 +173,10 @@ int main(void)
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_3);
   __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
 
-  /* TIM14 is started on-demand when TX frames are submitted */
+  /* PB0 idles LOW (OC forced-inactive): gate transistor OFF → SENT bus HIGH.
+   * tim3_dma_start() arms the DMA and starts the counter on-demand per TX frame. */
 
   /* RX starts when host sends SLCAN 'O' command */
-
-  /* Ensure PA4 starts HIGH (SENT idle) */
-  SENT_TX_GPIO_Port->BRR  = SENT_TX_Pin;
 
   /* USER CODE END 2 */
 
@@ -189,7 +188,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     /* Drain decoded SENT RX frames and flush queued USB responses to the host.
-     * TX is driven entirely by the TIM14 ISR; no polling needed here. */
+     * TX is driven entirely by TIM3 DMA; no polling needed here. */
     SentApp_Process();
   }
   /* USER CODE END 3 */
@@ -301,39 +300,45 @@ static void MX_TIM2_Init(void)
 }
 
 /**
-  * @brief TIM14 Initialization Function
+  * @brief TIM3 Initialization Function — variable-period TX scheduler with DMA ARR reload.
   * @param None
   * @retval None
   */
-static void MX_TIM14_Init(void)
+static void MX_TIM3_Init(void)
 {
 
-  /* USER CODE BEGIN TIM14_Init 0 */
+  /* USER CODE BEGIN TIM3_Init 0 */
 
-  /* USER CODE END TIM14_Init 0 */
+  /* USER CODE END TIM3_Init 0 */
 
-  /* USER CODE BEGIN TIM14_Init 1 */
+  /* USER CODE BEGIN TIM3_Init 1 */
 
-  /* USER CODE END TIM14_Init 1 */
-  htim14.Instance = TIM14;
-  /* Prescaler 71: 48 MHz / 72 = 666.67 kHz.  With ARR = 1 the timer fires every
-   * 2 counts → period = 2 × 72 / 48 MHz = 3 µs = 1 SENT tick.
-   * (ARR = 0 is avoided: STM32 timers do not reliably generate update events
-   * when the counter starts at ARR = 0 and has nowhere to count to.) */
-  htim14.Init.Prescaler = 71U;
-  htim14.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim14.Init.Period = 65535;
-  htim14.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  /* Preload DISABLED: __HAL_TIM_SET_AUTORELOAD takes immediate effect
-   * so the ISR can set exact low/high durations on each overflow. */
-  htim14.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  if (HAL_TIM_Base_Init(&htim14) != HAL_OK)
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  /* PSC = 0: timer runs at full 48 MHz.  ARR is loaded per-interval by DMA from a
+   * pre-computed buffer (ticks × cycles_per_tick − 1), giving exact variable periods
+   * without any per-interval ISR. */
+  htim3.Init.Prescaler = 0U;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 65535U;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  /* Preload DISABLED: DMA writes go directly to ARR so the new period takes effect
+   * on the same update event that triggered the transfer. */
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN TIM14_Init 2 */
-
-  /* USER CODE END TIM14_Init 2 */
+  /* USER CODE BEGIN TIM3_Init 2 */
+  /* Forced-inactive (OC3M = 100): OCxREF = 0 → PB0 LOW → gate transistor OFF
+   * → SENT bus pulled HIGH by external resistor = correct SENT idle state.
+   * CCR3 = 1: placeholder only; tim3_dma_start() overwrites this with
+   * low_ticks * cycles_per_tick before each PWM Mode 1 TX burst.
+   * CC3E enables the OC output to the GPIO AF mux. */
+  TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_FORCED_INACTIVE;
+  TIM3->CCR3  = 1U;
+  TIM3->CCER |= TIM_CCER_CC3E;
+  /* USER CODE END TIM3_Init 2 */
 
 }
 
@@ -344,23 +349,13 @@ static void MX_TIM14_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(SENT_TX_GPIO_Port, SENT_TX_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : SENT_TX_Pin */
-  GPIO_InitStruct.Pin = SENT_TX_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(SENT_TX_GPIO_Port, &GPIO_InitStruct);
+  /* PA2 (SENT_RX / TIM2_CH3) and PB0 (SENT_TX / TIM3_CH3) are configured as
+   * alternate-function pins in HAL_TIM_Base_MspInit — no standalone GPIO setup
+   * is required here. */
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -385,24 +380,18 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 }
 
 /*
- * TIM2 overflow and TIM14 update callbacks.
+ * TIM2 overflow callback: notifies the RX HAL so it can extend 16-bit timestamps
+ * across the 65536-count rollover (~1.37 ms at 48 MHz).
  *
- * TIM2 overflow: notifies the RX HAL so it can extend 16-bit timestamps across
- *   the 65536-count rollover (~1.37 ms at 48 MHz).
- *
- * TIM14 update: drives the two-phase SENT TX pulse on PA4.  The actual ISR
- *   logic lives in SentApp_OnTim14UpdateIrq() (sent_app.c) so all TX state
- *   is co-located with the TX HAL.
+ * TIM3 update is handled directly in TIM3_IRQHandler (stm32f0xx_it.c) without
+ * going through HAL_TIM_PeriodElapsedCallback to avoid HAL state-machine overhead
+ * on the time-critical TX cleanup path.
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2)
   {
     SentApp_OnSentRxTimerOverflow();
-  }
-  else if (htim->Instance == TIM14)
-  {
-    SentApp_OnTim14UpdateIrq();
   }
 }
 

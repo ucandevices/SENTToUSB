@@ -12,7 +12,7 @@ Project is using https://github.com/ucandevices/open-sent-c for SENT implementat
 |---|---|
 | MCU | STM32F042G4UX (UFQFPN28, 48 MHz HSI48, no crystal) |
 | **PA2** | SENT **RX** — TIM2 CH3 input capture, internal pull-up |
-| **PA4** | SENT **TX** — GPIO push-pull driven by TIM14 |
+| **PB0** | SENT **TX** — TIM3 CH3 output compare (toggle, AF1), DMA-driven |
 | USB | Full-speed CDC (Virtual COM Port, no driver needed on Win10+) |
 
 ---
@@ -20,7 +20,7 @@ Project is using https://github.com/ucandevices/open-sent-c for SENT implementat
 ## How RX works
 
 ```
-Sensor ──SENT signal──► PA2 (TIM2 CH3, RISING edge capture)
+Sensor ──SENT signal──► PA2 (TIM2 CH3, RISING edge capture)  [RX]
                               │
                     ISR: timestamp stored in RX HAL ring buffer
                               │
@@ -30,7 +30,7 @@ Sensor ──SENT signal──► PA2 (TIM2 CH3, RISING edge capture)
 ```
 
 1. Host sends `O\r` — bridge enters RX mode.
-2. Every RISING edge on PA2 triggers the TIM2 CH3 capture ISR, which records the raw 16-bit counter value.  A separate overflow ISR extends timestamps across the 16-bit rollover (~1.4 ms at 48 MHz).
+2. Every RISING edge on PA2 triggers the TIM2 CH3 capture ISR, which records the raw 16-bit counter value. A separate overflow ISR extends timestamps across the 16-bit rollover (~1.4 ms at 48 MHz).
 3. `SentApp_Process()` (main loop) polls the RX HAL for complete batches of 10 edges: sync + status + 6 data nibbles + CRC + leading edge of next interval.
 4. The bridge converts timestamps to µs intervals, extracts nibbles, validates CRC, and produces a CAN frame.
 5. The frame is serialised as `t<ID><DLC><data>\r` and flushed to USB.
@@ -44,18 +44,20 @@ Sensor ──SENT signal──► PA2 (TIM2 CH3, RISING edge capture)
 ```
 Host ──SLCAN 't' frame──► USB CDC RX callback (ISR context)
                               │
-                    bridge → TX HAL queue
-                    tim14_kick(): start TIM14 if idle
+                    bridge → TX HAL (pre-expands frame into toggle array)
+                    tim3_dma_start(): arm DMA and start TIM3 if idle
                               │
-              TIM14 ISR fires once per half-interval (3 µs/tick):
-                Phase 0: pop next interval → PA4 LOW for 15 µs
-                Phase 1: PA4 HIGH for remaining ticks
-                Repeat until queue empty → PA4 idle HIGH, TIM14 stops
+              TIM3 CH3 OC toggle (AF1 on PB0) fires at CCR3=1 each period:
+                First toggle → pin LOW (SENT active-LOW pulse start)
+                Subsequent toggles alternate LOW/HIGH per interval
+              DMA1_Ch3 reloads TIM3→ARR from pre-computed buffer on each update
+              Final DMA TC → TIM3 update ISR → stop timer, pin forced HIGH (idle)
 ```
 
-- TIM14 is reprogrammed on each TX kick: PSC = 0, ARR = (48 MHz × tick_us) − 1.  Default **1 tick = 3 µs**; the host can change the TX tick period at runtime (see SLCAN `SET_TX_TICK` below).
-- Each SENT interval = `low_ticks` active-LOW pulse (5 ticks, SAE J2716 minimum) + HIGH for `(N − 5)` ticks.
-- The bridge builds the full interval sequence (sync 56T + status + nibbles + CRC + 12T pause) and pushes it to the TX HAL.  The ISR drains it without any main-loop involvement.
+- TIM3 runs at 48 MHz with no prescaler. ARR values are pre-computed (ticks × cycles_per_tick − 1) and stored in a DMA buffer. DMA1_Channel3 reloads TIM3→ARR from that buffer on every update event, so the ISR is only needed for the single end-of-frame cleanup.
+- Default **1 tick = 3 µs** (ARR = 143 per tick); the host can change the TX tick period at runtime (see SLCAN `SET_TX_TICK` below).
+- Each SENT interval = `low_ticks` active-LOW pulse (5 ticks, SAE J2716 minimum) + rest for `(N − 5)` ticks.
+- The bridge builds the full interval sequence (sync 56T + status + nibbles + CRC + 12T pause) and the DMA drains it without any per-interval ISR involvement.
 
 Switch to TX mode and send one frame:
 ```
@@ -113,6 +115,7 @@ t5103AABBCC\r    DLC=3, 3 bytes = 6 nibbles packed high-nibble-first
 | Script | Purpose |
 |--------|---------|
 | `sent_viewer.py` | General SLCAN monitor GUI with TX panel and Learn mode |
+| `mlx_viewer.py` | MLX90377-specific GUI: angle dial + live history plot of angle & magnetic field |
 | `sent_test.py` | CLI — open port, apply config, print received frames for N seconds |
 | `check_rx.py` | Loopback sanity check: pings COM8 (TX), listens on COM9 (RX) |
 | `tx_signal.py` | Continuous TX every 10 ms for logic-analyzer capture on PA4 |

@@ -55,7 +55,7 @@
 /* USER CODE END ExternalFunctions */
 
 /* USER CODE BEGIN 0 */
-
+extern DMA_HandleTypeDef hdma_tim3_up;
 /* USER CODE END 0 */
 /**
   * Initializes the Global MSP.
@@ -114,19 +114,50 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base)
 
     /* USER CODE END TIM2_MspInit 1 */
   }
-  else if(htim_base->Instance==TIM14)
+  else if(htim_base->Instance==TIM3)
   {
-    /* USER CODE BEGIN TIM14_MspInit 0 */
+    /* USER CODE BEGIN TIM3_MspInit 0 */
 
-    /* USER CODE END TIM14_MspInit 0 */
+    /* USER CODE END TIM3_MspInit 0 */
     /* Peripheral clock enable */
-    __HAL_RCC_TIM14_CLK_ENABLE();
-    /* TIM14 interrupt Init */
-    HAL_NVIC_SetPriority(TIM14_IRQn, 1, 0);
-    HAL_NVIC_EnableIRQ(TIM14_IRQn);
-    /* USER CODE BEGIN TIM14_MspInit 1 */
+    __HAL_RCC_TIM3_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_DMA1_CLK_ENABLE();
 
-    /* USER CODE END TIM14_MspInit 1 */
+    /**TIM3 GPIO Configuration
+    PB0     ------> TIM3_CH3 (AF1)
+    HIGH speed: faster slew rate so the transistor gate switches sharply.
+    LOW speed adds ~9 us of rise time on the bus when driving a high-Cgs
+    transistor gate, stretching the apparent SENT active-LOW pulse. */
+    GPIO_InitStruct.Pin = SENT_TX_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF1_TIM3;
+    HAL_GPIO_Init(SENT_TX_GPIO_Port, &GPIO_InitStruct);
+
+    /* DMA1_Channel3 — TIM3 update event → reload TIM3→ARR */
+    hdma_tim3_up.Instance                 = DMA1_Channel3;
+    hdma_tim3_up.Init.Direction           = DMA_MEMORY_TO_PERIPH;
+    hdma_tim3_up.Init.PeriphInc           = DMA_PINC_DISABLE;
+    hdma_tim3_up.Init.MemInc              = DMA_MINC_ENABLE;
+    hdma_tim3_up.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+    hdma_tim3_up.Init.MemDataAlignment    = DMA_MDATAALIGN_HALFWORD;
+    hdma_tim3_up.Init.Mode                = DMA_NORMAL;
+    hdma_tim3_up.Init.Priority            = DMA_PRIORITY_HIGH;
+    HAL_DMA_Init(&hdma_tim3_up);
+    __HAL_LINKDMA(htim_base, hdma[TIM_DMA_ID_UPDATE], hdma_tim3_up);
+
+    /* DMA1_Channel2_3 interrupt (shared channel 2/3) */
+    HAL_NVIC_SetPriority(DMA1_Channel2_3_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Channel2_3_IRQn);
+
+    /* TIM3 interrupt — fires once after DMA completes for end-of-frame cleanup */
+    HAL_NVIC_SetPriority(TIM3_IRQn, 1, 0);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
+    /* USER CODE BEGIN TIM3_MspInit 1 */
+
+    /* USER CODE END TIM3_MspInit 1 */
   }
 
 }
@@ -158,19 +189,19 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* htim_base)
 
     /* USER CODE END TIM2_MspDeInit 1 */
   }
-  else if(htim_base->Instance==TIM14)
+  else if(htim_base->Instance==TIM3)
   {
-    /* USER CODE BEGIN TIM14_MspDeInit 0 */
+    /* USER CODE BEGIN TIM3_MspDeInit 0 */
 
-    /* USER CODE END TIM14_MspDeInit 0 */
-    /* Peripheral clock disable */
-    __HAL_RCC_TIM14_CLK_DISABLE();
+    /* USER CODE END TIM3_MspDeInit 0 */
+    __HAL_RCC_TIM3_CLK_DISABLE();
+    HAL_GPIO_DeInit(SENT_TX_GPIO_Port, SENT_TX_Pin);
+    HAL_DMA_DeInit(&hdma_tim3_up);
+    HAL_NVIC_DisableIRQ(DMA1_Channel2_3_IRQn);
+    HAL_NVIC_DisableIRQ(TIM3_IRQn);
+    /* USER CODE BEGIN TIM3_MspDeInit 1 */
 
-    /* TIM14 interrupt DeInit */
-    HAL_NVIC_DisableIRQ(TIM14_IRQn);
-    /* USER CODE BEGIN TIM14_MspDeInit 1 */
-
-    /* USER CODE END TIM14_MspDeInit 1 */
+    /* USER CODE END TIM3_MspDeInit 1 */
   }
 
 }

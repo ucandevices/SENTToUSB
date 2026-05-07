@@ -57,7 +57,8 @@
 /* External variables --------------------------------------------------------*/
 extern PCD_HandleTypeDef hpcd_USB_FS;
 extern TIM_HandleTypeDef htim2;
-extern TIM_HandleTypeDef htim14;
+extern TIM_HandleTypeDef htim3;
+extern DMA_HandleTypeDef hdma_tim3_up;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -157,24 +158,40 @@ void TIM2_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles TIM14 global interrupt.
+  * @brief This function handles TIM3 global interrupt.
+  *        Fires once per TX frame (after DMA TC enables TIM_IT_UPDATE) for end-of-frame cleanup.
   */
-void TIM14_IRQHandler(void)
+void TIM3_IRQHandler(void)
 {
-  /* USER CODE BEGIN TIM14_IRQn 0 */
-  if (__HAL_TIM_GET_FLAG(&htim14, TIM_FLAG_UPDATE) != RESET &&
-      __HAL_TIM_GET_IT_SOURCE(&htim14, TIM_IT_UPDATE) != RESET)
+  /* USER CODE BEGIN TIM3_IRQn 0 */
+  if (__HAL_TIM_GET_FLAG(&htim3, TIM_FLAG_UPDATE) != RESET &&
+      __HAL_TIM_GET_IT_SOURCE(&htim3, TIM_IT_UPDATE) != RESET)
   {
-    __HAL_TIM_CLEAR_IT(&htim14, TIM_IT_UPDATE);
-    SentApp_OnTim14UpdateIrq();
+    __HAL_TIM_CLEAR_IT(&htim3, TIM_IT_UPDATE);
+    SentApp_OnTim3UpdateIrq();
     return;
   }
 
-  /* USER CODE END TIM14_IRQn 0 */
-  HAL_TIM_IRQHandler(&htim14);
-  /* USER CODE BEGIN TIM14_IRQn 1 */
+  /* USER CODE END TIM3_IRQn 0 */
+  HAL_TIM_IRQHandler(&htim3);
+  /* USER CODE BEGIN TIM3_IRQn 1 */
 
-  /* USER CODE END TIM14_IRQn 1 */
+  /* USER CODE END TIM3_IRQn 1 */
+}
+
+/**
+  * @brief This function handles DMA1 channel 2 and 3 interrupts.
+  *        DMA1_Channel3 is used for TIM3 update → TIM3→ARR reload.
+  */
+void DMA1_Channel2_3_IRQHandler(void)
+{
+  /* USER CODE BEGIN DMA1_Channel2_3_IRQn 0 */
+
+  /* USER CODE END DMA1_Channel2_3_IRQn 0 */
+  HAL_DMA_IRQHandler(&hdma_tim3_up);
+  /* USER CODE BEGIN DMA1_Channel2_3_IRQn 1 */
+
+  /* USER CODE END DMA1_Channel2_3_IRQn 1 */
 }
 
 /**

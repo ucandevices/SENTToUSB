@@ -142,7 +142,7 @@ bool sent_bridge_start_rx(sent_bridge_t* b) {
     }
     bool ok = bridge_start_rx(b);
     if (ok) {
-        bridge_stop_tx(b);           /* stop TX HAL (TIM14 drains naturally) */
+        bridge_stop_tx(b);           /* stop TX HAL (DMA/timer drains naturally) */
         sent_mode_manager_start_rx(&b->mode_manager);
     }
     return ok;
@@ -171,7 +171,7 @@ bool sent_bridge_stop(sent_bridge_t* b) {
 
 /* Set TX tick period on the TX HAL.
  * tick_x10_us is validated against SENT_BRIDGE_LEARN_{MIN,MAX}_TICK_X10 so the
- * host cannot program TIM14 faster than the ISR can service. */
+ * tick_x10_us is validated so the host stays within the supported range. */
 static bool handle_cmd_set_tx_tick(sent_bridge_t* b, uint16_t tick_x10_us) {
     if (tick_x10_us < SENT_BRIDGE_LEARN_MIN_TICK_X10 ||
         tick_x10_us > SENT_BRIDGE_LEARN_MAX_TICK_X10) {

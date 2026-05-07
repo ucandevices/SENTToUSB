@@ -53,15 +53,15 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-void SentApp_OnTim14UpdateIrq(void);
+void SentApp_OnTim3UpdateIrq(void);
 
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
 #define SENT_RX_Pin GPIO_PIN_2
 #define SENT_RX_GPIO_Port GPIOA
-#define SENT_TX_Pin GPIO_PIN_4
-#define SENT_TX_GPIO_Port GPIOA
+#define SENT_TX_Pin GPIO_PIN_0
+#define SENT_TX_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
