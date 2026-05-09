@@ -13,7 +13,7 @@ Requirements:  pip install pyserial
 """
 
 import tkinter as tk
-from tkinter import ttk, font
+from tkinter import ttk, font, filedialog, messagebox
 import serial
 import serial.tools.list_ports
 import threading
@@ -98,6 +98,10 @@ class SentMonitor:
         self.sync_errors  = 0
         self._frame_times: list[float] = []
         self._tree_iids: deque = deque()   # iids of rows in the frame table, newest first
+
+        self.log_file = None
+        self.log_file_path: str | None = None
+        self.recording = False
 
         self._build_ui()
         self._refresh_ports()
@@ -253,6 +257,9 @@ class SentMonitor:
         self.pause_btn = ttk.Button(ctrl, text="Pause", command=self._toggle_pause)
         self.pause_btn.pack(fill=tk.X, pady=2)
         ttk.Button(ctrl, text="Clear", command=self._clear).pack(fill=tk.X, pady=2)
+        ttk.Button(ctrl, text="Save Log…", command=self._save_log_dialog).pack(fill=tk.X, pady=2)
+        self.record_btn = ttk.Button(ctrl, text="● Record…", command=self._toggle_recording)
+        self.record_btn.pack(fill=tk.X, pady=2)
 
     def _apply_preset(self):
         name = self.preset_var.get()
@@ -374,21 +381,20 @@ class SentMonitor:
         tf = ttk.LabelFrame(parent, text=" Received Frames ", padding=4)
         tf.pack(fill=tk.BOTH, expand=True, padx=6, pady=2)
 
-        cols = ("time", "can_id", "dlc", "data_hex", "nibbles", "slcan")
+        cols = ("time", "can_id", "dlc", "data_hex", "nibbles")
         self.tree = ttk.Treeview(tf, columns=cols, show="headings", height=8,
-                                  selectmode="browse")
+                                  selectmode="extended")
         headers = {
             "time":     ("Time",       75, tk.CENTER),
             "can_id":   ("CAN ID",     65, tk.CENTER),
             "dlc":      ("DLC",        35, tk.CENTER),
             "data_hex": ("Data (hex)", 110, tk.CENTER),
             "nibbles":  ("Nibbles",   155, tk.CENTER),
-            "slcan":    ("SLCAN",     160, tk.W),
         }
         for col in cols:
             h, w, anchor = headers[col]
             self.tree.heading(col, text=h)
-            self.tree.column(col, width=w, minwidth=30, anchor=anchor, stretch=(col=="slcan"))
+            self.tree.column(col, width=w, minwidth=30, anchor=anchor, stretch=(col=="nibbles"))
 
         ysb = ttk.Scrollbar(tf, orient=tk.VERTICAL,   command=self.tree.yview)
         xsb = ttk.Scrollbar(tf, orient=tk.HORIZONTAL, command=self.tree.xview)
@@ -401,13 +407,30 @@ class SentMonitor:
         self.tree.tag_configure("error", foreground="#FF6666")
         self.tree.tag_configure("ok",    foreground="#88CC88")
 
+        # Copy support: keyboard shortcuts + right-click context menu.
+        self.tree.bind("<Control-c>", self._copy_tree_selection)
+        self.tree.bind("<Control-C>", self._copy_tree_selection)
+        self.tree.bind("<Control-a>", self._select_all_tree)
+        self.tree.bind("<Control-A>", self._select_all_tree)
+
+        self._tree_menu = tk.Menu(self.root, tearoff=0,
+                                  bg="#2a2a3e", fg="#CCCCDD",
+                                  activebackground="#4a4a6e",
+                                  activeforeground="#FFFFFF")
+        self._tree_menu.add_command(label="Copy",       command=self._copy_tree_selection)
+        self._tree_menu.add_command(label="Copy All",   command=self._copy_tree_all)
+        self._tree_menu.add_command(label="Select All", command=self._select_all_tree)
+        self._tree_menu.add_separator()
+        self._tree_menu.add_command(label="Save to File…", command=self._save_log_dialog)
+        self.tree.bind("<Button-3>", self._show_tree_menu)
+
         # ── Raw log ──
         lf = ttk.LabelFrame(parent, text=" Raw Log ", padding=4)
         lf.pack(fill=tk.X, padx=6, pady=(2,6))
 
         self.log = tk.Text(lf, height=5, font=("Consolas", 9),
                            bg="#131320", fg="#888899",
-                           insertbackground="#AAAACC", state=tk.DISABLED,
+                           insertbackground="#AAAACC",
                            wrap=tk.NONE)
         log_ysb = ttk.Scrollbar(lf, orient=tk.VERTICAL,   command=self.log.yview)
         log_xsb = ttk.Scrollbar(lf, orient=tk.HORIZONTAL, command=self.log.xview)
@@ -423,6 +446,25 @@ class SentMonitor:
         self.log.tag_config("slcan", foreground="#666688")   # data frame t/T
         self.log.tag_config("other", foreground="#555566")   # z/Z frame ACK
         self.log.tag_config("tx_cmd", foreground="#55FF55")  # outgoing commands → host
+
+        # Read-only but selectable: block edit keystrokes/paste, allow Ctrl shortcuts.
+        self.log.bind("<Key>",      self._log_block_edit)
+        self.log.bind("<<Paste>>",  lambda e: "break")
+        self.log.bind("<Button-2>", lambda e: "break")
+        self.log.bind("<Control-a>", self._select_all_log)
+        self.log.bind("<Control-A>", self._select_all_log)
+
+        self._log_menu = tk.Menu(self.root, tearoff=0,
+                                 bg="#2a2a3e", fg="#CCCCDD",
+                                 activebackground="#4a4a6e",
+                                 activeforeground="#FFFFFF")
+        self._log_menu.add_command(label="Copy",       command=self._copy_log_selection)
+        self._log_menu.add_command(label="Copy All",   command=self._copy_log_all)
+        self._log_menu.add_command(label="Select All", command=self._select_all_log)
+        self._log_menu.add_separator()
+        self._log_menu.add_command(label="Save Raw Log…", command=self._save_raw_log_dialog)
+        self.log.bind("<Button-3>",
+                      lambda e: self._log_menu.tk_popup(e.x_root, e.y_root))
 
     # ── Serial port helpers ───────────────────────────────────────────────────
 
@@ -586,6 +628,7 @@ class SentMonitor:
 
     def _disconnect(self):
         self._tx_stop()
+        self._stop_recording()
         self.running = False
         if self.serial_port:
             try:
@@ -617,9 +660,7 @@ class SentMonitor:
         self.sv_last_meta.set("ID: —    DLC: —")
         self.tree.delete(*self._tree_iids)
         self._tree_iids.clear()
-        self.log.config(state=tk.NORMAL)
         self.log.delete("1.0", tk.END)
-        self.log.config(state=tk.DISABLED)
 
     # ── RX thread ─────────────────────────────────────────────────────────────
 
@@ -792,11 +833,17 @@ class SentMonitor:
             dlc,
             data_hex,
             nibbles_str,
-            line,
         ), tags=("ok",))
         self._tree_iids.appendleft(iid)
         if len(self._tree_iids) > self.MAX_TABLE_ROWS:
             self.tree.delete(self._tree_iids.pop())
+
+        if self.recording and self.log_file:
+            try:
+                self.log_file.write(",".join(self._csv_quote(v) for v in (
+                    ts, f"{cid:03X}", dlc, data_hex, nibbles_str)) + "\n")
+            except OSError:
+                self._stop_recording()
 
     def _send(self, data: bytes):
         """Write bytes to the serial port and echo them to the raw log (green)."""
@@ -804,6 +851,156 @@ class SentMonitor:
             self.serial_port.write(data)
             label = data.decode("ascii", errors="replace").replace("\r", "\\r")
             self._append_log(f"→ {label}", tag="tx_cmd")
+
+    # ── Export / record / copy helpers ────────────────────────────────────────
+
+    @staticmethod
+    def _csv_quote(value) -> str:
+        s = str(value)
+        if any(c in s for c in (",", '"', "\n", "\r")):
+            return '"' + s.replace('"', '""') + '"'
+        return s
+
+    def _save_log_dialog(self):
+        """Write all currently displayed frames to a CSV file (oldest first)."""
+        if not self._tree_iids:
+            messagebox.showinfo("Save Log", "No frames to save.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save received frames",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"),
+                       ("Text files", "*.txt"),
+                       ("All files", "*.*")],
+            initialfile=f"sent_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("time,can_id,dlc,data_hex,nibbles\n")
+                for iid in reversed(self._tree_iids):
+                    vals = self.tree.item(iid, "values")
+                    f.write(",".join(self._csv_quote(v) for v in vals) + "\n")
+        except OSError as e:
+            messagebox.showerror("Save Log", str(e))
+
+    def _save_raw_log_dialog(self):
+        """Write the current raw-log contents verbatim to a file."""
+        text = self.log.get("1.0", "end-1c")
+        if not text:
+            messagebox.showinfo("Save Raw Log", "Log is empty.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save raw log",
+            defaultextension=".log",
+            filetypes=[("Log files", "*.log"),
+                       ("Text files", "*.txt"),
+                       ("All files", "*.*")],
+            initialfile=f"sent_raw_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log",
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError as e:
+            messagebox.showerror("Save Raw Log", str(e))
+
+    def _toggle_recording(self):
+        """Start or stop streaming each decoded frame to a CSV file as it arrives."""
+        if self.recording:
+            self._stop_recording()
+            return
+        path = filedialog.asksaveasfilename(
+            title="Record frames to file (streaming)",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile=f"sent_record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        )
+        if not path:
+            return
+        try:
+            self.log_file = open(path, "w", encoding="utf-8", buffering=1)
+            self.log_file.write("time,can_id,dlc,data_hex,nibbles\n")
+            self.log_file_path = path
+            self.recording = True
+            self.record_btn.config(text="■ Stop Recording")
+        except OSError as e:
+            messagebox.showerror("Record", str(e))
+            self.log_file = None
+            self.log_file_path = None
+
+    def _stop_recording(self):
+        if self.log_file:
+            try:
+                self.log_file.close()
+            except OSError:
+                pass
+        self.log_file = None
+        self.log_file_path = None
+        if self.recording:
+            self.recording = False
+            self.record_btn.config(text="● Record…")
+
+    def _copy_tree_selection(self, event=None):
+        sel = self.tree.selection()
+        if not sel:
+            return "break"
+        # Treeview returns selection in arbitrary order; sort by row index for sane output.
+        ordered = sorted(sel, key=self.tree.index)
+        lines = ["\t".join(str(v) for v in self.tree.item(iid, "values"))
+                 for iid in ordered]
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
+        return "break"
+
+    def _copy_tree_all(self):
+        if not self._tree_iids:
+            return
+        lines = ["\t".join(str(v) for v in self.tree.item(iid, "values"))
+                 for iid in reversed(self._tree_iids)]
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(lines))
+
+    def _select_all_tree(self, event=None):
+        self.tree.selection_set(*self.tree.get_children())
+        return "break"
+
+    def _show_tree_menu(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid and iid not in self.tree.selection():
+            self.tree.selection_set(iid)
+        self._tree_menu.tk_popup(event.x_root, event.y_root)
+
+    def _log_block_edit(self, event):
+        # Allow Ctrl shortcuts (Ctrl+C, Ctrl+A, Ctrl+Insert) and pure modifiers/navigation.
+        if event.state & 0x4:   # Control held
+            return None
+        nav_keys = {"Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
+                    "Shift_L", "Shift_R", "Control_L", "Control_R",
+                    "Alt_L", "Alt_R", "Tab", "ISO_Left_Tab"}
+        if event.keysym in nav_keys:
+            return None
+        return "break"
+
+    def _select_all_log(self, event=None):
+        self.log.tag_add("sel", "1.0", "end-1c")
+        return "break"
+
+    def _copy_log_selection(self):
+        try:
+            text = self.log.get("sel.first", "sel.last")
+        except tk.TclError:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+
+    def _copy_log_all(self):
+        text = self.log.get("1.0", "end-1c")
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
 
     def _append_log(self, text: str, tag: str | None = None):
         # Tag each line by SLCAN response type (caller may override with explicit tag):
@@ -827,14 +1024,12 @@ class SentMonitor:
             else:
                 tag = "other"
 
-        self.log.config(state=tk.NORMAL)
         self.log.insert(tk.END, text + "\n", tag)
         self.log.see(tk.END)
         # Keep log bounded
         lines = int(self.log.index(tk.END).split(".")[0])
         if lines > 600:
             self.log.delete("1.0", f"{lines - 500}.0")
-        self.log.config(state=tk.DISABLED)
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────

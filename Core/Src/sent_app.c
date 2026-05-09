@@ -66,7 +66,7 @@ static uint16_t g_slcan_in_len;
 
 /* USB TX ring buffer — responses queued here, flushed from the main loop.
  * Decouples USB transmit (which may be busy) from ISR/callback context. */
-#define USB_TX_BUF_SIZE 408U
+#define USB_TX_BUF_SIZE 384U
 static uint8_t  g_usb_tx[USB_TX_BUF_SIZE];
 static uint16_t g_usb_tx_head;
 static uint16_t g_usb_tx_tail;
@@ -90,9 +90,10 @@ static uint32_t g_last_sync_errors    = 0U;
  * PWM Mode 1: OCxREF=1 when CNT < CCR3 (LOW pulse), OCxREF=0 otherwise (HIGH phase).
  * Through the gate transistor: OCxREF=1 → PB0 HIGH → transistor ON → SENT bus LOW.
  *
- * When the mode is switched from FORCED_INACTIVE to PWM1 (with CNT=0 < CCR3), OCxREF
- * goes HIGH immediately — the SENT bus falling edge (start of the active-LOW pulse)
- * occurs right at that transition, one ARR=intervals[0] period after which it rises.
+ * The sync interval (period 0) is special: OC3 is started in FORCED_ACTIVE so the
+ * LOW pulse appears immediately on the bus, then a busy-wait + FORCED_INACTIVE
+ * ends it, and PWM1 is queued to take effect at the first UEV.  See
+ * tim3_dma_start() for the full rationale (AN4776 §1.4.2 OCxM preload behavior).
  *
  * DMA1_Channel3 reloads TIM3→ARR from intervals[1..n_raw-1] on each update event.
  * When DMA completes, the TC callback arms TIM_IT_UPDATE for one final cleanup event.
@@ -138,7 +139,18 @@ static void usb_tx_flush(void)
 
 /* DMA transfer-complete callback: all ARR values except the last have been loaded.
  * Disable the DMA request and arm the TIM3 update interrupt so the final interval
- * fires SentApp_OnTim3UpdateIrq() for cleanup. */
+ * fires SentApp_OnTim3UpdateIrq() for cleanup.
+ *
+ * Note on the end-of-frame "glitch" rising edge: at end-of-pause UEV, the
+ * cleanup ISR's CCMR2=FORCED_INACTIVE write lags the UEV by ~1-3 µs, during
+ * which PWM1 sees CNT=0 < CCR3 and briefly drives OCxREF=1.  That brief LOW
+ * becomes a small extra rising edge ~6 µs after pause's true rise.  Tempting
+ * to suppress it by writing FORCED_INACTIVE here, but on STM32F0 OCxM is
+ * NOT preload-controllable (AN4776 §1.4.2 talks about families where it is) —
+ * the write would take effect immediately and truncate pause's LOW pulse,
+ * collapsing the RX-measured CRC interval to ~1 µs and breaking decoding.
+ * Leave the glitch in place; the RX HAL's sync detection at the next frame's
+ * status edge re-aligns the batch and skips it. */
 static void tim3_tx_dma_complete(DMA_HandleTypeDef *hdma)
 {
     (void)hdma;
@@ -153,16 +165,30 @@ static void tim3_tx_dma_complete(DMA_HandleTypeDef *hdma)
  * Sequence:
  *   1. Fold each [LOW_ticks, HIGH_ticks] pair into a single total ARR value
  *      (cycles−1) written back to intervals[0..n_raw-1] in-place.
- *   2. Set CCR3 = low_ticks × cycles_per_tick (fixed active-LOW pulse width).
- *   3. Load intervals[0] into TIM3→ARR; set CNT=0.
- *   4. Arm DMA to transfer intervals[1..n_raw-1] → TIM3→ARR on update events.
- *   5. Switch to PWM Mode 1 and start the counter.
- *      PWM1: OCxREF=1 when CNT < CCR3 → PB0 HIGH → transistor ON → SENT bus LOW.
- *      With CNT=0 < CCR3, OCxREF goes HIGH at the CCMR2 write (bus falls immediately).
+ *   2. URS+UG flush: pre-load CCR3, ARR=intervals[0] (sync), and CCMR2 with
+ *      OC3 = FORCED_ACTIVE.  URS=1 keeps UG from generating a UEV/DMA request.
+ *   3. CR1 |= CEN — counter starts.  OC3 is FORCED_ACTIVE so OCxREF=1 → PB0
+ *      HIGH → transistor ON → bus LOW.  This is the sync's active-LOW pulse.
+ *   4. Spin until CNT >= CCR3 (≈ 15 µs), then write OC3 = FORCED_INACTIVE
+ *      (immediate effect: OCxREF=0, bus HIGH) to end the LOW pulse.  Then
+ *      write OC3 = PWM1 — per AN4776 §1.4.2 OCxM is preload-like, so this
+ *      mid-period write is held until the next UEV.
+ *   5. Arm DMA to transfer intervals[1..n_raw-1] → TIM3→ARR on update events,
+ *      then enable TIM_DMA_UPDATE.
+ *   6. At CNT=ARR (end of sync, ≈ 168 µs) the OC unit reloads with PWM1 and
+ *      DMA loads intervals[1] into ARR atomically — status interval starts
+ *      with a clean PWM1 LOW pulse, and the rest of the frame runs DMA-only.
  *
  * After the last DMA transfer, tim3_tx_dma_complete() enables TIM_IT_UPDATE.
  * SentApp_OnTim3UpdateIrq() stops the timer and returns OC3 to FORCED_INACTIVE
- * (PB0 LOW → transistor OFF → SENT bus HIGH = idle). */
+ * (PB0 LOW → transistor OFF → SENT bus HIGH = idle).
+ *
+ * Why FORCED_ACTIVE for the sync's LOW pulse instead of just letting PWM1
+ * handle it: empirically, transitioning OC3 from FORCED_INACTIVE → PWM1 with
+ * the timer stopped does NOT make the OC comparator re-evaluate OCxREF on the
+ * first counter tick — OCxREF stays at the FORCED_INACTIVE value (=0) for the
+ * entire first period, suppressing the sync's LOW pulse.  Forcing OCxREF=1 via
+ * FORCED_ACTIVE bypasses that. */
 static void tim3_dma_start(void)
 {
     if (TIM3->CR1 & TIM_CR1_CEN) { return; }   /* already running */
@@ -193,34 +219,41 @@ static void tim3_dma_start(void)
         g_tx_hal.intervals[i] = (uint16_t)(c - 1U);
     }
 
-    TIM3->CCR3 = (uint16_t)ccr3;   /* fixed LOW pulse width in cycles */
-    TIM3->ARR  = g_tx_hal.intervals[0];
-    TIM3->CNT  = 0U;
-    TIM3->SR   = 0U;
+    /* Flush stale TIM3 state from the previous frame.  URS=1 makes the upcoming
+     * UG a preload-only refresh (no UEV → no DMA request).  Start in
+     * FORCED_ACTIVE so OCxREF=1 the moment CEN goes 1 — this guarantees the
+     * sync's 15 µs LOW pulse on the bus regardless of whatever transition
+     * weirdness was suppressing it under PWM1. */
+    TIM3->CR1   |= TIM_CR1_URS;
+    TIM3->CCR3   = (uint16_t)ccr3;
+    TIM3->ARR    = g_tx_hal.intervals[0];
+    TIM3->CCMR2  = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_FORCED_ACTIVE;
+    TIM3->EGR    = TIM_EGR_UG;
+    TIM3->SR     = 0U;
+    TIM3->CR1   &= ~TIM_CR1_URS;
+    TIM3->CNT    = 0U;
 
-    /* Arm the DMA channel with the source pointer, but do NOT enable the timer's
-     * UDE bit yet.  If UDE is enabled here while UIF is set (or any stale request
-     * is latched in the DMA controller), DMA fires immediately and consumes
-     * intervals[1] -- overwriting ARR before period 0 even starts, which makes
-     * the sync interval silently disappear. */
+    /* Start the counter while OC3 is FORCED_ACTIVE — bus drops LOW immediately
+     * (start of the sync's 15 µs active-LOW pulse). */
+    TIM3->CR1 |= TIM_CR1_CEN;
+
+    /* Spin until CNT crosses CCR3 (= 15 µs LOW pulse), then close the LOW pulse
+     * by writing OC3 = FORCED_INACTIVE — this is immediate (bus rises HIGH).
+     * Then queue OC3 = PWM1; per AN4776 §1.4.2 OCxM is preload-like, so a
+     * mid-period write to PWM1 is NOT picked up by the OC comparator until the
+     * next UEV.  That's exactly what we want: at CNT=ARR (end of sync) the OC
+     * unit reloads with PWM1 and the status interval's LOW pulse starts cleanly,
+     * with the DMA-loaded intervals[1] becoming the new ARR at the same UEV. */
+    while ((uint16_t)TIM3->CNT < (uint16_t)ccr3) { /* ~15 µs */ }
+    TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_FORCED_INACTIVE;
+    TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_PWM1;
+
     if (n_raw > 1U) {
+        TIM3->DIER |= TIM_DMA_UPDATE;
         HAL_DMA_Start_IT(&hdma_tim3_up,
                           (uint32_t)&g_tx_hal.intervals[1],
                           (uint32_t)&TIM3->ARR,
                           (uint32_t)(n_raw - 1U));
-    }
-
-    /* PWM Mode 1: OCxREF=1 when CNT < CCR3.  With CNT=0, OCxREF goes HIGH at the
-     * CCMR2 write → SENT bus LOW (frame start).  Counter starts immediately after. */
-    TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_PWM1;
-    TIM3->CR1  |= TIM_CR1_CEN;
-
-    /* Enable the DMA/IT request AFTER the timer is running.  UIF is guaranteed 0
-     * here (counter just started, hasn't reached ARR yet), so no spurious request
-     * can fire.  The first real UEV at the end of period 0 (= end of sync) is
-     * what triggers the first DMA transfer for intervals[1]. */
-    if (n_raw > 1U) {
-        TIM3->DIER |= TIM_DMA_UPDATE;
     } else {
         TIM3->DIER |= TIM_IT_UPDATE;
     }

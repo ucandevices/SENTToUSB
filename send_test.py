@@ -15,16 +15,16 @@ s.reset_input_buffer()
 def send(cmd, wait=0.05):
     s.write((cmd + "\r").encode())
     time.sleep(wait)
-    return s.read(64)
+    return s.read(256)
 
 print(f"{'O':30s} -> {send('O')!r}")
 print(f"{'t6003051E00':30s} -> {send('t6003051E00')!r}")  # tick = 3.0 us
 print(f"{'t600102':30s} -> {send('t600102')!r}")          # TX mode
 
 for i in range(COUNT):
-    r = send("t52050100123456", wait=0.01)
+    r = send("t52050100123456", wait=0.02)
+    print(f"  frame {i+1}: {r!r}")
     if b'z' not in r:
-        print(f"  frame {i+1}: NACK {r!r}, retrying")
         time.sleep(0.005)
         continue
     time.sleep(0.002)   # let the SENT frame finish on the wire (~580 us)

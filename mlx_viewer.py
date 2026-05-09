@@ -37,6 +37,8 @@ ANGLE_FULL_SCALE = 0x1000  # 12 bits -> 360 deg
 HISTORY_SECONDS = 10.0
 DIAL_SIZE       = 360
 PLOT_HEIGHT     = 220
+SLOW_HISTORY_MAX = 128
+SLOW_PLOT_COLORS = ["#88FFAA", "#FFCC66", "#FF88CC", "#AA99FF", "#66E0FF", "#FF8866"]
 
 
 def slcan_config_frame(nibbles: int, crc_mode: int, seed: int,
@@ -82,6 +84,12 @@ class MLXViewer:
         self.angle_deg    = 0.0
         self.last_rx_time = 0.0
         self.zero_offset  = 0.0
+        self.slow_count   = 0
+        self.slow_id      = None
+        self.slow_data    = None
+        self.slow_format  = ""
+        self.slow_by_id: dict[int, dict] = {}
+        self._slow_plot_ids: list[int] = []
 
         # (timestamp, angle_deg)
         self.history: deque[tuple[float, float]] = deque()
@@ -113,6 +121,12 @@ class MLXViewer:
         style.map("TButton",
             background=[("active","#4a4a6e"),("pressed","#5a5a7e"),("disabled","#1a1a2e")],
             foreground=[("active","#FFFFFF"),("disabled","#555566")])
+        style.configure("Treeview", background="#131320", foreground="#CCCCDD",
+                        fieldbackground="#131320", rowheight=19,
+                        font=("Consolas", 9))
+        style.configure("Treeview.Heading", background="#2a2a3e", foreground="#AAAACC",
+                        font=("Consolas", 9, "bold"))
+        style.map("Treeview", background=[("selected", "#3a3a5e")])
         self.root.option_add("*TCombobox*Listbox.background",       "#2a2a3e")
         self.root.option_add("*TCombobox*Listbox.foreground",       "#CCCCDD")
         self.root.option_add("*TCombobox*Listbox.selectBackground", "#4a4a6e")
@@ -173,10 +187,12 @@ class MLXViewer:
         self.sv_rate   = tk.StringVar(value="—")
         self.sv_crc    = tk.StringVar(value="—")
         self.sv_sync   = tk.StringVar(value="—")
+        self.sv_slow   = tk.StringVar(value="—")
         rows = [("Frames:",   self.sv_frames, "#CCCCDD"),
                 ("Rate:",     self.sv_rate,   "#88CCFF"),
                 ("CRC err:",  self.sv_crc,    "#FF8888"),
-                ("Sync err:", self.sv_sync,   "#FFAA66")]
+                ("Sync err:", self.sv_sync,   "#FFAA66"),
+                ("Slow:",     self.sv_slow,   "#88FFAA")]
         for i,(k,v,fg) in enumerate(rows):
             ttk.Label(st, text=k).grid(row=i, column=0, sticky=tk.W, pady=1)
             ttk.Label(st, textvariable=v, foreground=fg).grid(
@@ -222,8 +238,26 @@ class MLXViewer:
         tk.Label(readout, textvariable=self.sv_age, font=sm, fg="#666688",
                  bg="#1e1e2e", anchor=tk.W).pack(fill=tk.X)
 
+        slow_lf = ttk.LabelFrame(readout, text=" Slow Channel ", padding=6)
+        slow_lf.pack(fill=tk.BOTH, expand=True, pady=(14,0))
+        self.sv_slow_latest = tk.StringVar(value="no slow message")
+        tk.Label(slow_lf, textvariable=self.sv_slow_latest, font=("Consolas", 11, "bold"),
+                 fg="#88FFAA", bg="#1e1e2e", anchor=tk.W).pack(fill=tk.X)
+        cols = ("id", "fmt", "value", "dec", "range", "count", "age")
+        self.slow_table = ttk.Treeview(slow_lf, columns=cols, show="headings", height=9)
+        headings = [("id", "ID", 42), ("fmt", "Fmt", 54), ("value", "Value", 86),
+                    ("dec", "Dec", 72), ("range", "Range", 92),
+                    ("count", "N", 46), ("age", "Age", 58)]
+        for col, text, width in headings:
+            self.slow_table.heading(col, text=text)
+            self.slow_table.column(col, width=width, anchor=tk.E if col != "fmt" else tk.W,
+                                   stretch=(col == "value"))
+        self.slow_table.pack(fill=tk.BOTH, expand=True, pady=(6,0))
+        for i, color in enumerate(SLOW_PLOT_COLORS):
+            self.slow_table.tag_configure(f"plot{i}", foreground=color)
+
         plot_lf = ttk.LabelFrame(parent,
-            text=f" History (last {HISTORY_SECONDS:.0f} s) ", padding=4)
+            text=f" Angle + slow history (last {HISTORY_SECONDS:.0f} s) ", padding=4)
         plot_lf.pack(fill=tk.BOTH, expand=True, padx=6, pady=3)
         self.plot = tk.Canvas(plot_lf, bg="#131320", highlightthickness=0,
                               height=PLOT_HEIGHT)
@@ -278,7 +312,7 @@ class MLXViewer:
         if w <= 4 or h <= 4:
             return
 
-        m_l, m_r, m_t, m_b = 38, 8, 8, 18
+        m_l, m_r, m_t, m_b = 38, 94, 8, 18
         x0, x1 = m_l, w - m_r
         y0, y1 = m_t, h - m_b
         p.create_rectangle(x0, y0, x1, y1, outline="#3a3a5e")
@@ -299,6 +333,34 @@ class MLXViewer:
         cutoff = now - HISTORY_SECONDS
         while self.history and self.history[0][0] < cutoff:
             self.history.popleft()
+
+        for idx, sid in enumerate(self._slow_plot_ids):
+            entry = self.slow_by_id.get(sid)
+            if not entry:
+                continue
+            samples = [(t, v) for t, v in entry["history"] if t >= cutoff]
+            if len(samples) < 2:
+                continue
+            values = [v for _t, v in samples]
+            lo = min(values)
+            hi = max(values)
+            if lo == hi:
+                continue
+
+            color = SLOW_PLOT_COLORS[idx % len(SLOW_PLOT_COLORS)]
+            pts: list[float] = []
+            for t, value in samples:
+                x = x1 - (x1 - x0) * ((now - t) / HISTORY_SECONDS)
+                y = y1 - (y1 - y0) * ((value - lo) / (hi - lo))
+                pts.extend([x, y])
+            if len(pts) >= 4:
+                p.create_line(*pts, fill=color, width=1)
+
+            ly = y0 + 12 + idx * 14
+            p.create_line(x1 + 8, ly, x1 + 22, ly, fill=color, width=2)
+            p.create_text(x1 + 26, ly, text=f"ID {sid:02X}", anchor=tk.W,
+                          fill=color, font=("Consolas", 8))
+
         if len(self.history) < 2:
             return
 
@@ -365,14 +427,62 @@ class MLXViewer:
             try: self.serial.write(data)
             except Exception: pass
 
+    def _slow_hex_width(self, fmt: str) -> int:
+        return 4 if fmt == "ESM16" else (3 if fmt == "ESM12" else 2)
+
+    def _record_slow_message(self, when: float, slow_id: int, data: int, fmt: str):
+        entry = self.slow_by_id.get(slow_id)
+        if entry is None:
+            entry = {
+                "format": fmt,
+                "data": data,
+                "count": 0,
+                "first": when,
+                "last": when,
+                "min": data,
+                "max": data,
+                "history": deque(maxlen=SLOW_HISTORY_MAX),
+            }
+            self.slow_by_id[slow_id] = entry
+
+        entry["format"] = fmt
+        entry["data"] = data
+        entry["count"] += 1
+        entry["last"] = when
+        entry["min"] = min(entry["min"], data)
+        entry["max"] = max(entry["max"], data)
+        entry["history"].append((when, data))
+
+    def _select_slow_plot_ids(self, now: float) -> list[int]:
+        cutoff = now - HISTORY_SECONDS
+        candidates: list[tuple[float, int]] = []
+        for sid, entry in self.slow_by_id.items():
+            hist = entry["history"]
+            while hist and hist[0][0] < cutoff:
+                hist.popleft()
+            if len(hist) < 2:
+                continue
+            values = [v for _t, v in hist]
+            if min(values) == max(values):
+                continue
+            candidates.append((entry["last"], sid))
+        candidates.sort(reverse=True)
+        return [sid for _last, sid in candidates[:len(SLOW_PLOT_COLORS)]]
+
     def _reset_zero(self):
         self.zero_offset = 0.0
         self.zero_pending.set(False)
 
     def _clear(self):
         self.history.clear()
+        self.slow_by_id.clear()
+        self._slow_plot_ids = []
         self._frame_times.clear()
         self.frame_count = self.crc_errors = self.sync_errors = 0
+        self.slow_count = 0
+        self.slow_id = None
+        self.slow_data = None
+        self.slow_format = ""
 
     def _rx_loop(self):
         buf = b""
@@ -430,12 +540,22 @@ class MLXViewer:
 
         angle_raw = (d[0] << 4) | (d[1] >> 4)
         angle_deg = (angle_raw * 360.0) / ANGLE_FULL_SCALE
+        now = time.monotonic()
+
+        if dlc >= 7 and len(d) >= 7 and (d[3] & 0x01):
+            slow_id = d[4]
+            slow_data = d[5] | (d[6] << 8)
+            slow_format = "ESM16" if (d[3] & 0x04) else ("ESM12" if (d[3] & 0x02) else "SSM")
+            self.slow_id = slow_id
+            self.slow_data = slow_data
+            self.slow_format = slow_format
+            self.slow_count += 1
+            self._record_slow_message(now, slow_id, slow_data, slow_format)
 
         if self.zero_pending.get():
             self.zero_offset = angle_deg
             self.zero_pending.set(False)
 
-        now = time.monotonic()
         self.angle_raw    = angle_raw
         self.angle_deg    = angle_deg
         self.last_rx_time = now
@@ -453,6 +573,8 @@ class MLXViewer:
         self.sv_rate.set(f"{fps:.1f} fps")
         self.sv_crc.set(f"{self.crc_errors}")
         self.sv_sync.set(f"{self.sync_errors}")
+        self.sv_slow.set(f"{self.slow_count}")
+        self._slow_plot_ids = self._select_slow_plot_ids(now)
 
         a = (self.angle_deg - self.zero_offset) % 360.0
         self.sv_angle.set(f"{a:6.2f}°")
@@ -467,6 +589,30 @@ class MLXViewer:
                 self.sv_age.set(f"stale  ({age:.1f} s ago)")
         else:
             self.sv_age.set("no data")
+
+        if self.slow_id is None:
+            self.sv_slow_latest.set("no slow message")
+        else:
+            width = self._slow_hex_width(self.slow_format)
+            self.sv_slow_latest.set(
+                f"{self.slow_format}  ID 0x{self.slow_id:02X}  data 0x{self.slow_data:0{width}X}")
+
+        for iid in self.slow_table.get_children():
+            self.slow_table.delete(iid)
+        plotted = {sid: i for i, sid in enumerate(self._slow_plot_ids)}
+        for sid, entry in sorted(self.slow_by_id.items()):
+            fmt = entry["format"]
+            width = self._slow_hex_width(fmt)
+            age = now - entry["last"]
+            age_text = f"{age*1000:.0f}ms" if age < 1.0 else f"{age:.1f}s"
+            tags = ()
+            if sid in plotted:
+                tags = (f"plot{plotted[sid] % len(SLOW_PLOT_COLORS)}",)
+            range_text = f"{entry['min']:0{width}X}-{entry['max']:0{width}X}"
+            self.slow_table.insert("", tk.END, iid=f"{sid:02X}", tags=tags,
+                                   values=(f"{sid:02X}", fmt, f"0x{entry['data']:0{width}X}",
+                                           f"{entry['data']}", range_text,
+                                           f"{entry['count']}", age_text))
 
         self._draw_dial()
         self._draw_plot()

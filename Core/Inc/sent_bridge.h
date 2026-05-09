@@ -9,6 +9,7 @@
 #include "sent/hal.h"
 #include "sent/mode_manager.h"
 #include "sent/sent_protocol.h"
+#include "sent/sent_slow_channel.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,7 @@ typedef struct {
     bool has_rx_hal;
     bool has_tx_hal;
     uint16_t output_can_id;
+    sent_slow_channel_t slow_channel;
     struct {
         bool active;            /* true while searching for first valid frame to learn tick */
         sent_config_t saved_config; /* original config restored after learning */

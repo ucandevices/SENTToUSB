@@ -5,6 +5,7 @@
 
 #include "sent/sent_decoder.h"
 #include "sent/sent_encoder.h"
+#include "sent/sent_slow_channel.h"
 
 /* HAL helpers — guard + call, return true if no HAL present (no-op). */
 
@@ -80,6 +81,7 @@ static void bridge_stop_all(sent_bridge_t* b) {
  * @param out_id  CAN ID to use for the output frame
  * @param out     [out] CAN frame to populate */
 static void pack_rx_can_frame(const sent_frame_t* f,
+                               const sent_slow_message_t* slow,
                                uint16_t out_id,
                                sent_can_frame_t* out) {
     uint8_t n = f->data_nibbles_count;
@@ -88,10 +90,28 @@ static void pack_rx_can_frame(const sent_frame_t* f,
     out->id = out_id;
     out->extended = false;
     out->dlc = bytes;
+    for (uint8_t i = 0U; i < SENT_CAN_MAX_DLC; ++i) {
+        out->data[i] = 0U;
+    }
     for (uint8_t i = 0U; i < bytes; ++i) {
         uint8_t hi = (2U * i     < n) ? (f->data_nibbles[2U * i]      & 0x0FU) : 0U;
         uint8_t lo = (2U * i + 1U < n) ? (f->data_nibbles[2U * i + 1U] & 0x0FU) : 0U;
         out->data[i] = (uint8_t)((hi << 4U) | lo);
+    }
+
+    if (slow != NULL && slow->format != SENT_SLOW_FORMAT_NONE && bytes <= 3U) {
+        out->dlc = 7U;
+        out->data[3] = 0x01U;
+        if (slow->format == SENT_SLOW_FORMAT_ENHANCED_12_8 ||
+            slow->format == SENT_SLOW_FORMAT_ENHANCED_16_4) {
+            out->data[3] |= 0x02U;
+        }
+        if (slow->format == SENT_SLOW_FORMAT_ENHANCED_16_4) {
+            out->data[3] |= 0x04U;
+        }
+        out->data[4] = slow->message_id;
+        out->data[5] = (uint8_t)(slow->data & 0xFFU);
+        out->data[6] = (uint8_t)((slow->data >> 8U) & 0xFFU);
     }
 }
 
@@ -143,6 +163,7 @@ bool sent_bridge_start_rx(sent_bridge_t* b) {
     bool ok = bridge_start_rx(b);
     if (ok) {
         bridge_stop_tx(b);           /* stop TX HAL (DMA/timer drains naturally) */
+        sent_slow_channel_reset(&b->slow_channel);
         sent_mode_manager_start_rx(&b->mode_manager);
     }
     return ok;
@@ -198,6 +219,7 @@ static bool handle_cmd_learn_tick(sent_bridge_t* b) {
     if (ok) {
         bridge_stop_tx(b);
         b->learn.active = true;
+        sent_slow_channel_reset(&b->slow_channel);
         sent_mode_manager_start_rx(&b->mode_manager);
     } else {
         b->config = b->learn.saved_config;
@@ -224,6 +246,7 @@ void sent_bridge_init(sent_bridge_t* bridge,
         bridge->config_valid = sent_validate_config(&bridge->config);
     }
     bridge->output_can_id = SENT_CAN_ID_SENT_RX_FRAME;
+    sent_slow_channel_init(&bridge->slow_channel);
     sent_mode_manager_init(&bridge->mode_manager);
 
     if (rx_hal != NULL) {
@@ -403,11 +426,17 @@ bool sent_bridge_on_sent_timestamps_us(sent_bridge_t* bridge,
         } else {
             bridge->mode_manager.stats.sync_errors++;
         }
+        sent_slow_channel_reset(&bridge->slow_channel);
         return false;
     }
 
     bridge->mode_manager.stats.frames_decoded++;
-    pack_rx_can_frame(&decoded, bridge->output_can_id, out_can_frame);
+    sent_slow_message_t slow_message;
+    sent_slow_message_t* slow_ptr = NULL;
+    if (sent_slow_channel_process_status(&bridge->slow_channel, decoded.status, &slow_message)) {
+        slow_ptr = &slow_message;
+    }
+    pack_rx_can_frame(&decoded, slow_ptr, bridge->output_can_id, out_can_frame);
     return true;
 }
 

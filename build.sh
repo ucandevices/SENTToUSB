@@ -95,7 +95,8 @@ compile_s() {
 # Create output directory tree
 # ---------------------------------------------------------------------------
 mkdir -p \
-    "${OUT}/Core/Src/sent" \
+    "${OUT}/Core/Inc/sent/implementation" \
+    "${OUT}/Core/Inc/sent/implementation/STM32" \
     "${OUT}/Core/Startup" \
     "${OUT}/Drivers/STM32F0xx_HAL_Driver/Src" \
     "${OUT}/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src" \
@@ -108,7 +109,7 @@ mkdir -p \
 # ---------------------------------------------------------------------------
 echo "[Core/Src]"
 for src in \
-    main.c sent_app.c stm32f0xx_hal_msp.c stm32f0xx_it.c \
+    bootloader.c main.c sent_app.c sent_bridge.c slcan.c stm32f0xx_hal_msp.c stm32f0xx_it.c \
     syscalls.c sysmem.c system_stm32f0xx.c
 do
     compile_c "${PROJ}/Core/Src/${src}" \
@@ -117,17 +118,22 @@ do
 done
 
 # ---------------------------------------------------------------------------
-# Compile — Core/Src/sent  (O0 + g3)
+# Compile — Core/Inc/sent/implementation  (O0 + g3)
 # ---------------------------------------------------------------------------
-echo "[Core/Src/sent]"
+echo "[Core/Inc/sent/implementation]"
 for src in \
-    bridge.c hal_stm32f042.c mode_manager.c sent_crc.c \
-    sent_decoder.c sent_encoder.c sent_protocol.c slcan.c
+    mode_manager.c sent_crc.c sent_decoder.c sent_encoder.c \
+    sent_protocol.c sent_slow_channel.c
 do
-    compile_c "${PROJ}/Core/Src/sent/${src}" \
-              "${OUT}/Core/Src/sent/${src%.c}.o" \
-              "${APP_FLAGS}"
+    compile_c "${PROJ}/Core/Inc/sent/implementation/${src}" \
+              "${OUT}/Core/Inc/sent/implementation/${src%.c}.o" \
+              "${LIB_FLAGS}"
 done
+
+echo "[Core/Inc/sent/implementation/STM32]"
+compile_c "${PROJ}/Core/Inc/sent/implementation/STM32/hal_stm32f042.c" \
+          "${OUT}/Core/Inc/sent/implementation/STM32/hal_stm32f042.o" \
+          "${LIB_FLAGS}"
 
 # ---------------------------------------------------------------------------
 # Compile — Core/Startup  (assembler)
@@ -196,21 +202,23 @@ compile_c "${PROJ}/USB_DEVICE/Target/usbd_conf.c" \
 # ---------------------------------------------------------------------------
 echo "[Link]"
 OBJS=(
+    "${OUT}/Core/Src/bootloader.o"
     "${OUT}/Core/Src/main.o"
     "${OUT}/Core/Src/sent_app.o"
+    "${OUT}/Core/Src/sent_bridge.o"
+    "${OUT}/Core/Src/slcan.o"
     "${OUT}/Core/Src/stm32f0xx_hal_msp.o"
     "${OUT}/Core/Src/stm32f0xx_it.o"
     "${OUT}/Core/Src/syscalls.o"
     "${OUT}/Core/Src/sysmem.o"
     "${OUT}/Core/Src/system_stm32f0xx.o"
-    "${OUT}/Core/Src/sent/bridge.o"
-    "${OUT}/Core/Src/sent/hal_stm32f042.o"
-    "${OUT}/Core/Src/sent/mode_manager.o"
-    "${OUT}/Core/Src/sent/sent_crc.o"
-    "${OUT}/Core/Src/sent/sent_decoder.o"
-    "${OUT}/Core/Src/sent/sent_encoder.o"
-    "${OUT}/Core/Src/sent/sent_protocol.o"
-    "${OUT}/Core/Src/sent/slcan.o"
+    "${OUT}/Core/Inc/sent/implementation/STM32/hal_stm32f042.o"
+    "${OUT}/Core/Inc/sent/implementation/mode_manager.o"
+    "${OUT}/Core/Inc/sent/implementation/sent_crc.o"
+    "${OUT}/Core/Inc/sent/implementation/sent_decoder.o"
+    "${OUT}/Core/Inc/sent/implementation/sent_encoder.o"
+    "${OUT}/Core/Inc/sent/implementation/sent_protocol.o"
+    "${OUT}/Core/Inc/sent/implementation/sent_slow_channel.o"
     "${OUT}/Core/Startup/startup_stm32f042g4ux.o"
     "${OUT}/Drivers/STM32F0xx_HAL_Driver/Src/stm32f0xx_hal.o"
     "${OUT}/Drivers/STM32F0xx_HAL_Driver/Src/stm32f0xx_hal_cortex.o"

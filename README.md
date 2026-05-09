@@ -108,6 +108,19 @@ t52050100123456\r
 t5103AABBCC\r    DLC=3, 3 bytes = 6 nibbles packed high-nibble-first
 ```
 
+When a slow-channel message completes, the same 0x510 frame is extended to DLC=7.
+The fast-channel bytes remain first, so old viewers can keep reading the angle:
+```
+byte 0..2  fast channel nibbles, unchanged for MLX90377 H.4
+byte 3     slow flags: bit0=new slow message, bit1=enhanced, bit2=16-bit ESM
+byte 4     slow message ID
+byte 5..6  slow data, little-endian
+```
+
+The slow decoder supports SAE J2716 Short Serial Message and Enhanced Serial
+Message. MLX90377 defaults to ESM with 12-bit data and 8-bit ID. Slow-channel
+CRC is validated inside open-sent-c; only validated messages are forwarded.
+
 ---
 
 ## Python scripts
@@ -126,6 +139,56 @@ t5103AABBCC\r    DLC=3, 3 bytes = 6 nibbles packed high-nibble-first
 pip install pyserial
 ```
 `verify_sent.py` additionally needs `pip install saleae` and Logic2 running with the automation API enabled (port 10430).
+
+---
+
+## Integration Testing
+
+A pytest suite (`test_sent_integration.py`) drives **two SENTToUSB
+dongles** against each other to verify the full TX → wire → RX loop.
+
+**Hardware setup**
+- TX dongle on `COM15`, RX dongle on `COM20` (override at the top of
+  `TestSENTIntegration` in `test_sent_integration.py`).
+- Wire **PB0 of the TX dongle → PA2 of the RX dongle** plus a common
+  ground.  Without that physical link the data-path tests will report
+  *"No 0x510 frames received"*.
+
+**Coverage** (18 cases, ~60–90 s)
+- Connectivity: `V`/`N`/`F` queries, RX & TX mode entry
+- TX → RX frames at 4 tick periods (3, 6, 9, 12 µs)
+- 10-frame back-to-back sequence
+- Quiet-channel listen (no TX driver)
+- Per-tick persistence across multiple frames
+
+Each tick test first sends a `0x001` config frame to the RX device so
+the bridge can derive a tick-appropriate `sync_min_us` threshold — the
+firmware default (100 µs, calibrated for 3 µs ticks) is otherwise
+fooled by long data nibbles at higher tick periods.
+
+**Run**
+```bash
+pip install -r test_requirements.txt   # pytest>=7, pyserial>=3.5
+python diagnostic.py                   # sanity-check both ports
+python -m pytest test_sent_integration.py -v -s
+```
+
+`run_tests.py` provides shortcuts (`all`, `quick`, `framesize`,
+`combined`, `debug`, single tick periods).
+
+See **[TEST_INTEGRATION_README.md](TEST_INTEGRATION_README.md)** for the
+full command reference, per-test descriptions, and troubleshooting
+guide.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `test_sent_integration.py` | Main pytest suite (18 cases) |
+| `test_requirements.txt` | Python dependencies |
+| `TEST_INTEGRATION_README.md` | Full test documentation |
+| `run_tests.py` | Cross-platform pytest runner with shortcuts |
+| `diagnostic.py` | Standalone V/N/O/TX-mode probe for both ports |
 
 ---
 
