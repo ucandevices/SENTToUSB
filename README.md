@@ -1,8 +1,27 @@
-# SENTToUSB — STM32F042 USB ↔ SENT Bridge
+# SENT (SAE J2716) USB Converter — SENTToUSB
 
-USB CDC (Virtual COM Port) adapter for **SAE J2716 SENT** sensors.
-Talks to the host using the **SLCAN** text protocol over any serial terminal.
-Project is using https://github.com/ucandevices/open-sent-c for SENT implementation.
+[![Buy on Tindie](https://img.shields.io/badge/Tindie-Buy_SENT_USB_Converter-fb5b1b?logo=tindie&logoColor=white)](https://www.tindie.com/products/lll7/sent-j2716-usb-converter/)
+[![Buy on Lectronz](https://img.shields.io/badge/Lectronz-Buy_in_EU-5468ff)](https://lectronz.com/stores/ucandevices)
+[![Product page](https://img.shields.io/badge/docs-ucandevices.github.io-1f6feb)](https://ucandevices.github.io/sentusb.html)
+
+> **Open source USB dongle that decodes SAE J2716 / ISO 21097 SENT automotive sensors. Auto-learns tick period, nibble count and CRC mode. Plug-and-play virtual COM port on Windows, Linux and macOS — no proprietary drivers.**
+
+<p align="center">
+  <img src="https://ucandevices.github.io/img/products/sent.png" alt="SENT (SAE J2716) USB Converter - dongle photo" width="60%">
+</p>
+
+USB CDC (Virtual COM Port) adapter for **SAE J2716 / ISO 21097 SENT** sensors. Decodes 4-, 6- and 8-nibble frames with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes, supports CRC seeds `0x03` (SAE APR2016) and `0x05` (legacy / GM), and includes a TX mode for synthesizing SENT frames to bench-test ECUs. Talks to the host using the **SLCAN** text protocol over any serial terminal. SENT protocol implementation: [open-sent-c](https://github.com/ucandevices/open-sent-c).
+
+A commercial SENT analyzer from an automotive tool vendor typically costs hundreds to thousands of euros. This one is around **$23** on [Tindie](https://www.tindie.com/products/lll7/sent-j2716-usb-converter/).
+
+## Where to buy
+
+| Where | Region | Link |
+|---|---|---|
+| **Tindie** | Worldwide | https://www.tindie.com/products/lll7/sent-j2716-usb-converter/ |
+| **Lectronz** | EU | https://lectronz.com/stores/ucandevices |
+| **Elty** | Poland / EU | https://elty.pl/ |
+| **Kamami** | Poland / EU | https://kamami.pl/ |
 
 ---
 
@@ -230,3 +249,38 @@ python -c "import serial,time; s=serial.Serial('COM8',115200,timeout=1); s.write
 
 The `boot` command writes a magic value (`0xDEADBEEF`) to a `.noinit` RAM variable and resets.
 On the next boot the firmware detects the magic, clears it, and jumps to the STM32F042 ROM bootloader at `0x1FFFC400`.
+
+---
+
+## FAQ
+
+**What is SENT (SAE J2716)?**
+SENT (Single Edge Nibble Transmission) is the SAE J2716 / ISO 21097 single-wire digital protocol used by many modern automotive sensors — pressure, position, throttle, MAP, angle — to transmit data to an ECU. Each frame is a stream of 4-bit nibbles separated by falling edges, with a status nibble, data nibbles and a CRC.
+
+**What is the cheapest USB SENT analyzer?**
+The uCanDevices SENT USB Converter is an open source SAE J2716 / ISO 21097 dongle around $23. It enumerates as a USB CDC virtual COM port on Windows 10+, Linux and macOS with no proprietary driver, and decodes 4-, 6- and 8-nibble SENT sensors with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes.
+
+**Can it auto-detect SENT tick period and CRC mode from an unknown sensor?**
+Yes. Send `t600104\r` to enter Learn mode. The firmware auto-detects tick period (in 0.1 µs units), nibble count (4, 6 or 8) and CRC mode, then replies once with a `0x601` result frame. Send `O\r` afterwards to resume RX with the learned configuration.
+
+**Can it transmit SENT frames to simulate a sensor?**
+Yes. Start TX mode with `t600102\r`, then send frame data as `0x520` CAN frames (B0 = status nibble, B1–B4 = data nibbles packed big-endian). Optional `0x600 / 05` control frame sets the TX tick period at runtime (2.0–90.0 µs). TX is driven from `PB0` via TIM3 CH3 + DMA, so there is no per-interval ISR jitter.
+
+**Which sensors are known to work?**
+The defaults are tuned for the MLX90377 angle sensor (3 µs tick, 6 nibbles, DATA_ONLY, seed `0x03`). Other verified presets include the VW/Audi 04L 906 051 L DPF sensor (~3 µs, 6 nibbles, STATUS_AND_DATA, seed `0x05`) and the GM 12643955 MAP sensor (~3 µs, 6 nibbles, DATA_ONLY, seed `0x05`). For other sensors, use Learn mode.
+
+**What if my sensor uses a non-standard CRC seed?**
+Both standard seeds are supported: `0x03` (SAE APR2016) and `0x05` (legacy / GM). Set the seed in B2 of the `0x001` configuration frame.
+
+**Is the firmware open source?**
+Yes — STM32F042G4 firmware in this repository, SENT protocol layer in [open-sent-c](https://github.com/ucandevices/open-sent-c). A USB DFU bootloader is included; `sent_viewer.py` is a free GUI client.
+
+---
+
+## Related projects
+
+- SENT protocol layer: [open-sent-c](https://github.com/ucandevices/open-sent-c)
+- Sibling products: [USB LIN Converter](https://ucandevices.github.io/ulc.html), [USB CAN Converter (UCCB)](https://ucandevices.github.io/uccb.html), [CAN FD USB Converter (CFUC)](https://ucandevices.github.io/cfuc.html)
+- Product page: https://ucandevices.github.io/sentusb.html
+- All uCanDevices products: https://ucandevices.github.io/
+- Contact: devices.ucan@gmail.com
