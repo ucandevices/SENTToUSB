@@ -49,8 +49,11 @@
   * @{
   */
 /* Define size for the receive and transmit buffer over CDC */
-#define APP_RX_DATA_SIZE  512
-#define APP_TX_DATA_SIZE  512
+/* RX: one full-speed bulk packet (64 bytes) is all the CDC layer ever writes
+ * here.  TX: unused (CDC_Transmit_FS sends from the caller's buffer).  The
+ * device has 6 KB of RAM; the 512-byte defaults took a sixth of it. */
+#define APP_RX_DATA_SIZE  64
+#define APP_TX_DATA_SIZE  4
 /* USER CODE BEGIN EXPORTED_DEFINES */
 
 /* USER CODE END EXPORTED_DEFINES */

@@ -169,9 +169,10 @@ int main(void)
   /* USER CODE BEGIN 2 */
   SentApp_Init();
 
-  /* Start RX: TIM2 CH3 input capture interrupt + overflow interrupt */
+  /* Start RX: TIM2 CH3 input capture interrupt.  TIM2 free-runs over its full
+   * 32 bits (wraps every 89 s), so no overflow interrupt is needed: intervals
+   * are differences of captured values modulo 2^32. */
   HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_3);
-  __HAL_TIM_ENABLE_IT(&htim2, TIM_IT_UPDATE);
 
   /* PB0 idles LOW (OC forced-inactive): gate transistor OFF → SENT bus HIGH.
    * tim3_dma_start() arms the DMA and starts the counter on-demand per TX frame. */
@@ -258,7 +259,7 @@ static void MX_TIM2_Init(void)
   htim2.Instance = TIM2;
   htim2.Init.Prescaler = 0;
   htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim2.Init.Period = 65535 ;
+  htim2.Init.Period = 4294967295;
   htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
@@ -280,14 +281,16 @@ static void MX_TIM2_Init(void)
   {
     Error_Handler();
   }
-  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  /* SAE J2716 5.3.2: pulse periods are measured between FALLING edges (the
+   * edge the transmitter drives actively; the rising edge is slow and shaped). */
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_FALLING;
   sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
   sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
   /* ICFilter = 3: fSAMPLING = fCKINT (48 MHz), N = 8 samples required.
    * Rejects glitches shorter than 8/48 MHz ≈ 167 ns while passing all SENT
    * signal edges (minimum active-LOW pulse = 5 ticks = 15 µs >> 167 ns).
-   * This eliminates spurious captures from NPN-transistor switching ringing
-   * that corrupt the 10-edge RX batch and cause decode failures. */
+   * This eliminates spurious captures from transistor switching ringing
+   * that would otherwise add edges to the stream and cause decode failures. */
   sConfigIC.ICFilter = 3;
   if (HAL_TIM_IC_ConfigChannel(&htim2, &sConfigIC, TIM_CHANNEL_3) != HAL_OK)
   {
@@ -333,9 +336,11 @@ static void MX_TIM3_Init(void)
   /* Forced-inactive (OC3M = 100): OCxREF = 0 → PB0 LOW → gate transistor OFF
    * → SENT bus pulled HIGH by external resistor = correct SENT idle state.
    * CCR3 = 1: placeholder only; tim3_dma_start() overwrites this with
-   * low_ticks * cycles_per_tick before each PWM Mode 1 TX burst.
+   * the LOW-pulse length before each PWM Mode 1 TX burst.
+   * OC3PE: CCR3 is preloaded, so it can be changed during a frame and take
+   * effect exactly at the next update event (used to end a frame cleanly).
    * CC3E enables the OC output to the GPIO AF mux. */
-  TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_FORCED_INACTIVE;
+  TIM3->CCMR2 = (TIM3->CCMR2 & ~TIM_CCMR2_OC3M) | TIM_OCMODE_FORCED_INACTIVE | TIM_CCMR2_OC3PE;
   TIM3->CCR3  = 1U;
   TIM3->CCER |= TIM_CCER_CC3E;
   /* USER CODE END TIM3_Init 2 */
@@ -365,36 +370,24 @@ static void MX_GPIO_Init(void)
 /* USER CODE BEGIN 4 */
 
 /*
- * TIM2 CH3 input-capture callback — fires on every RISING edge on PA2.
- * PA2 is connected to the SENT sensor output (active-LOW signal).  Each rising
- * edge marks the end of a low pulse; the captured counter value lets the RX HAL
- * reconstruct interval durations by differencing consecutive captures.
+ * TIM2 CH3 input-capture callback — fires on every FALLING edge on PA2.
+ * PA2 is connected to the SENT line (active-LOW pulses).  Each falling edge
+ * starts a new SENT pulse; the captured 32-bit counter value lets the receiver
+ * reconstruct pulse periods by differencing consecutive captures.
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_3)
   {
-    uint16_t captured = (uint16_t)HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_3);
-    SentApp_OnSentRxCaptureEdge(captured);
+    SentApp_OnSentRxCaptureEdge(HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_3));
   }
 }
 
 /*
- * TIM2 overflow callback: notifies the RX HAL so it can extend 16-bit timestamps
- * across the 65536-count rollover (~1.37 ms at 48 MHz).
- *
  * TIM3 update is handled directly in TIM3_IRQHandler (stm32f0xx_it.c) without
  * going through HAL_TIM_PeriodElapsedCallback to avoid HAL state-machine overhead
  * on the time-critical TX cleanup path.
  */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  if (htim->Instance == TIM2)
-  {
-    SentApp_OnSentRxTimerOverflow();
-  }
-}
-
 /* USER CODE END 4 */
 
 /**

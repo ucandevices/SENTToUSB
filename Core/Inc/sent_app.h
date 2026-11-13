@@ -11,7 +11,7 @@ extern "C" {
  * sent_app.h — Public API for the SENT bridge application layer.
  *
  * The application wires USB CDC (SLCAN) to the SENT protocol:
- *   RX: host sends 'O' → device captures SENT frames from PA2 (TIM2 CH3)
+ *   RX: host sends 'O' → device captures SENT falling edges on PA2 (TIM2 CH3)
  *                         and streams decoded frames back as SLCAN 't' lines.
  *   TX: host sends SLCAN 't' frame → device generates SENT signal on PB0 (TIM3 CH3).
  *       DMA1_Channel3 reloads TIM3→ARR on each update; a single TIM3 update ISR
@@ -21,17 +21,16 @@ extern "C" {
 /* Call once after peripheral initialisation */
 void SentApp_Init(void);
 
-/* Call from the main loop — drains decoded RX frames and flushes USB TX */
+/* Call from the main loop — parses host commands, decodes captured SENT edges
+ * and flushes USB TX */
 void SentApp_Process(void);
 
-/* Called from USB CDC receive callback (USB interrupt context) */
+/* Called from USB CDC receive callback (USB interrupt context) — queues the bytes */
 void SentApp_OnUsbRx(const uint8_t *data, uint32_t len);
 
-/* Called from TIM2 CH3 input-capture ISR — records SENT rising-edge timestamp */
-void SentApp_OnSentRxCaptureEdge(uint16_t captured_counter);
-
-/* Called from TIM2 overflow ISR — extends the 16-bit capture counter */
-void SentApp_OnSentRxTimerOverflow(void);
+/* Called from TIM2 CH3 input-capture ISR — records a SENT falling-edge timestamp
+ * (raw value of the free-running 32-bit TIM2 counter) */
+void SentApp_OnSentRxCaptureEdge(uint32_t captured_counter);
 
 /* Called from TIM3 update ISR — end-of-frame cleanup after DMA TX completes */
 void SentApp_OnTim3UpdateIrq(void);

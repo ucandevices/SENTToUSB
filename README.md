@@ -10,7 +10,7 @@
   <img src="https://ucandevices.github.io/img/products/sent.png" alt="SENT (SAE J2716) USB Converter - dongle photo" width="60%">
 </p>
 
-USB CDC (Virtual COM Port) adapter for **SAE J2716 / ISO 21097 SENT** sensors. Decodes 4-, 6- and 8-nibble frames with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes, supports CRC seeds `0x03` (SAE APR2016) and `0x05` (legacy / GM), and includes a TX mode for synthesizing SENT frames to bench-test ECUs. Talks to the host using the **SLCAN** text protocol over any serial terminal. SENT protocol implementation: [open-sent-c](https://github.com/ucandevices/open-sent-c).
+USB CDC (Virtual COM Port) adapter for **SAE J2716 / ISO 21097 SENT** sensors. Decodes frames with 1 to 8 data nibbles at any tick time from 2 to 113 µs, with or without pause pulse, with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes, supports the SAE J2716 recommended CRC (`0x03`), the J2716 legacy CRC (FEB2008) and the `0x05` variant used by some GM / VW sensors, decodes Short and Enhanced serial messages, and includes a TX mode for synthesizing SENT frames to bench-test ECUs. Talks to the host using the **SLCAN** text protocol over any serial terminal. SENT protocol implementation: [open-sent-c](https://github.com/ucandevices/open-sent-c).
 
 A commercial SENT analyzer from an automotive tool vendor typically costs hundreds to thousands of euros. This one is around **$23** on [Tindie](https://www.tindie.com/products/lll7/sent-j2716-usb-converter/).
 
@@ -39,29 +39,33 @@ A commercial SENT analyzer from an automotive tool vendor typically costs hundre
 ## How RX works
 
 ```
-Sensor ──SENT signal──► PA2 (TIM2 CH3, RISING edge capture)  [RX]
+Sensor ──SENT signal──► PA2 (TIM2 CH3, FALLING edge capture)  [RX]
                               │
-                    ISR: timestamp stored in RX HAL ring buffer
+                    ISR: raw 32-bit timer value stored in the edge ring
                               │
-                    Main loop: bridge decodes batch of 10 edges
+                    Main loop: bridge aligns to frames and decodes them
                               │
                     SLCAN 't' frame → USB → host
 ```
 
 1. Host sends `O\r` — bridge enters RX mode.
-2. Every RISING edge on PA2 triggers the TIM2 CH3 capture ISR, which records the raw 16-bit counter value. A separate overflow ISR extends timestamps across the 16-bit rollover (~1.4 ms at 48 MHz).
-3. `SentApp_Process()` (main loop) polls the RX HAL for complete batches of 10 edges: sync + status + 6 data nibbles + CRC + leading edge of next interval.
-4. The bridge converts timestamps to µs intervals, extracts nibbles, validates CRC, and produces a CAN frame.
+2. Every FALLING edge on PA2 triggers the TIM2 CH3 capture ISR, which stores the raw counter value. SAE J2716 defines every pulse period from falling edge to falling edge. TIM2 free-runs over its full 32 bits at 48 MHz, so there is no overflow bookkeeping and the timing resolution is 20.8 ns.
+3. `SentApp_Process()` (main loop) drains the edge ring into the bridge. The bridge keeps the most recent edges and, as soon as it holds one frame's worth (sync + status + data nibbles + CRC), decodes that window:
+   - success → the frame is forwarded, and its last edge becomes the first edge of what follows;
+   - failure → the oldest edge is dropped and the search continues. This is how a pause pulse is stepped over and how alignment is recovered after a disturbance.
+
+   Frames are found by their structure (a sync pulse followed by the right number of valid nibbles and a matching CRC), not by a time threshold, so no tick-time setting is needed to receive.
+4. Checks per SAE J2716 5.3.3: sync pulse inside the configured tick range, every nibble 12–27 ticks, CRC, and successive calibration pulses within 1/64 of each other.
 5. The frame is serialised as `t<ID><DLC><data>\r` and flushed to USB.
 
-**Default config (MLX90377):** 3 µs/tick, 6 nibbles, DATA\_ONLY CRC, seed 0x03, output CAN ID 0x510.
+**Default config:** 6 data nibbles, DATA\_ONLY CRC, recommended CRC (`0x03`), tick range 2.0–113 µs, output CAN ID 0x510.
 
 ---
 
 ## How TX works
 
 ```
-Host ──SLCAN 't' frame──► USB CDC RX callback (ISR context)
+Host ──SLCAN 't' frame──► USB CDC RX callback (ISR) → byte ring → main loop
                               │
                     bridge → TX HAL (pre-expands frame into toggle array)
                     tim3_dma_start(): arm DMA and start TIM3 if idle
@@ -73,9 +77,11 @@ Host ──SLCAN 't' frame──► USB CDC RX callback (ISR context)
               Final DMA TC → TIM3 update ISR → stop timer, pin forced HIGH (idle)
 ```
 
-- TIM3 runs at 48 MHz with no prescaler. ARR values are pre-computed (ticks × cycles_per_tick − 1) and stored in a DMA buffer. DMA1_Channel3 reloads TIM3→ARR from that buffer on every update event, so the ISR is only needed for the single end-of-frame cleanup.
-- Default **1 tick = 3 µs** (ARR = 143 per tick); the host can change the TX tick period at runtime (see SLCAN `SET_TX_TICK` below).
-- Each SENT interval = `low_ticks` active-LOW pulse (5 ticks, SAE J2716 minimum) + rest for `(N − 5)` ticks.
+- TIM3 runs from 48 MHz. ARR values are pre-computed per interval and stored in a DMA buffer. DMA1_Channel3 reloads TIM3→ARR from that buffer on every update event, so the ISR is only needed for the single end-of-frame cleanup.
+- The timer prescaler is chosen per frame so that the longest interval fits the 16-bit ARR. This is what makes tick times above 24 µs and pause pulses up to 768 ticks possible.
+- Default **1 tick = 3 µs**; the host can change the TX tick period at runtime (see SLCAN `SET_TX_TICK` below).
+- Each SENT interval starts with an active-LOW pulse of nominally 5 ticks. PB0 is driven for about 10 µs less than that (never below 8 µs), because the output transistor switches off about 11 µs late through its 10 kΩ gate resistor. Without this the bus stays LOW for 26–29 µs and falling edges shift by up to half a tick at 3 µs.
+- Frames are sent one per host command, with the line idle in between. Tick times below 3 µs are outside what the output stage can drive cleanly.
 - The bridge builds the full interval sequence (sync 56T + status + nibbles + CRC + 12T pause) and the DMA drains it without any per-interval ISR involvement.
 
 Switch to TX mode and send one frame:
@@ -105,7 +111,7 @@ t52050100123456\r         transmit: status=1, nibbles [1,2,3,4,5,6]
 | `01` | 1 | Start RX |
 | `02` | 1 | Start TX |
 | `03` | 1 | Stop |
-| `04` | 1 | Learn tick period / nibble count / CRC mode from live signal |
+| `04` | 1 | Learn tick period, nibble count (1–8) and CRC variant from the live signal; answers once with a `0x601` frame |
 | `05` | 3 | Set TX tick period: `data[1..2]` = `tick_x10_us` (little-endian, 0.1 µs units; valid range 20–900, i.e. 2.0–90.0 µs) |
 
 Example — set TX tick to 5.0 µs (`tick_x10_us` = 50 = `0x0032`):
@@ -122,23 +128,48 @@ t52050100123456\r
       └──── CAN ID 0x520
 ```
 
+**Configuration frame (host → device, CAN ID 0x001):** each byte is optional (shorter DLC leaves the rest unchanged).
+```
+byte 0     data nibbles, 1..8
+byte 1     CRC mode: 0 = data nibbles only, 1 = status nibble + data
+byte 2     CRC selector: 0x03 = SAE J2716 recommended (default)
+                         0x05 = variant used by some GM / VW sensors
+                         0x85 = SAE J2716 legacy CRC (FEB2008 and older)
+byte 3     minimum tick, 0.5 µs units
+byte 4     maximum tick, 1 µs units
+byte 5..6  output CAN ID, big-endian
+```
+
+**Learn result (device → host, CAN ID 0x601, DLC 5):**
+```
+byte 0..1  tick, 0.1 µs units, little-endian
+byte 2     data nibbles
+byte 3     CRC mode
+byte 4     CRC selector (same values as config byte 2)
+```
+
 **Decoded RX frame (device → host, default CAN ID 0x510):**
 ```
-t5103AABBCC\r    DLC=3, 3 bytes = 6 nibbles packed high-nibble-first
+t5104AABBCC10\r    6 nibbles AA BB CC, status nibble 1
 ```
-
-When a slow-channel message completes, the same 0x510 frame is extended to DLC=7.
-The fast-channel bytes remain first, so old viewers can keep reading the angle:
 ```
-byte 0..2  fast channel nibbles, unchanged for MLX90377 H.4
-byte 3     slow flags: bit0=new slow message, bit1=enhanced, bit2=16-bit ESM
-byte 4     slow message ID
-byte 5..6  slow data, little-endian
+byte 0..B-1  data nibbles packed high-nibble-first, B = ceil(nibbles / 2)
+byte I       info byte, I = max(3, B):
+               bits 7..4  status and communication nibble
+               bit 0      a slow-channel message completed with this frame
+               bit 1      it is an Enhanced serial message (else Short)
+               bit 2      Enhanced with 16-bit data / 4-bit ID
+byte I+1     slow message ID        (only when bit 0 is set)
+byte I+2..3  slow data, little-endian
 ```
+DLC is I+1, or I+4 when a slow-channel message completed. For up to 6 data
+nibbles the info byte is byte 3, so DLC is 4 or 7 and the slow-channel bytes
+are where earlier firmware put them (which sent DLC 3 without the info byte).
 
 The slow decoder supports SAE J2716 Short Serial Message and Enhanced Serial
-Message. MLX90377 defaults to ESM with 12-bit data and 8-bit ID. Slow-channel
-CRC is validated inside open-sent-c; only validated messages are forwarded.
+Message (12-bit data / 8-bit ID and 16-bit data / 4-bit ID). Slow-channel CRC
+is validated inside open-sent-c; only validated messages are forwarded. Short
+messages are checked with the same CRC variant as the frame.
 
 ---
 
@@ -180,10 +211,9 @@ dongles** against each other to verify the full TX → wire → RX loop.
 - Quiet-channel listen (no TX driver)
 - Per-tick persistence across multiple frames
 
-Each tick test first sends a `0x001` config frame to the RX device so
-the bridge can derive a tick-appropriate `sync_min_us` threshold — the
-firmware default (100 µs, calibrated for 3 µs ticks) is otherwise
-fooled by long data nibbles at higher tick periods.
+Each tick test first sends a `0x001` config frame to the RX device to
+narrow its tick range around the tick under test. This is optional with
+current firmware, which receives any tick time on its default range.
 
 **Run**
 ```bash
@@ -258,19 +288,19 @@ On the next boot the firmware detects the magic, clears it, and jumps to the STM
 SENT (Single Edge Nibble Transmission) is the SAE J2716 / ISO 21097 single-wire digital protocol used by many modern automotive sensors — pressure, position, throttle, MAP, angle — to transmit data to an ECU. Each frame is a stream of 4-bit nibbles separated by falling edges, with a status nibble, data nibbles and a CRC.
 
 **What is the cheapest USB SENT analyzer?**
-The uCanDevices SENT USB Converter is an open source SAE J2716 / ISO 21097 dongle around $23. It enumerates as a USB CDC virtual COM port on Windows 10+, Linux and macOS with no proprietary driver, and decodes 4-, 6- and 8-nibble SENT sensors with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes.
+The uCanDevices SENT USB Converter is an open source SAE J2716 / ISO 21097 dongle around $23. It enumerates as a USB CDC virtual COM port on Windows 10+, Linux and macOS with no proprietary driver, and decodes SENT sensors with 1 to 8 data nibbles with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes.
 
 **Can it auto-detect SENT tick period and CRC mode from an unknown sensor?**
-Yes. Send `t600104\r` to enter Learn mode. The firmware auto-detects tick period (in 0.1 µs units), nibble count (4, 6 or 8) and CRC mode, then replies once with a `0x601` result frame. Send `O\r` afterwards to resume RX with the learned configuration.
+Yes. Send `t600104\r` to enter Learn mode. The firmware auto-detects tick period (in 0.1 µs units, 2–113 µs), nibble count (1 to 8), CRC mode and CRC variant, then replies once with a `0x601` result frame. A sensor that sends constant data together with a pause pulse of 12–27 ticks cannot be told apart from one with an extra data nibble; configure that one manually. Send `O\r` afterwards to resume RX with the learned configuration.
 
 **Can it transmit SENT frames to simulate a sensor?**
 Yes. Start TX mode with `t600102\r`, then send frame data as `0x520` CAN frames (B0 = status nibble, B1–B4 = data nibbles packed big-endian). Optional `0x600 / 05` control frame sets the TX tick period at runtime (2.0–90.0 µs). TX is driven from `PB0` via TIM3 CH3 + DMA, so there is no per-interval ISR jitter.
 
 **Which sensors are known to work?**
-The defaults are tuned for the MLX90377 angle sensor (3 µs tick, 6 nibbles, DATA_ONLY, seed `0x03`). Other verified presets include the VW/Audi 04L 906 051 L DPF sensor (~3 µs, 6 nibbles, STATUS_AND_DATA, seed `0x05`) and the GM 12643955 MAP sensor (~3 µs, 6 nibbles, DATA_ONLY, seed `0x05`). For other sensors, use Learn mode.
+The defaults match the MLX90377 angle sensor (3 µs tick, 6 nibbles, DATA_ONLY, seed `0x03`). Other verified presets include the VW/Audi 04L 906 051 L DPF sensor (~3 µs, 6 nibbles, STATUS_AND_DATA, seed `0x05`) and the GM 12643955 MAP sensor (~3 µs, 6 nibbles, DATA_ONLY, seed `0x05`). For other sensors, use Learn mode.
 
 **What if my sensor uses a non-standard CRC seed?**
-Both standard seeds are supported: `0x03` (SAE APR2016) and `0x05` (legacy / GM). Set the seed in B2 of the `0x001` configuration frame.
+Three CRC variants are supported, selected in B2 of the `0x001` configuration frame: `0x03` is the SAE J2716 recommended CRC (JAN2010 and later), `0x85` is the J2716 legacy CRC of FEB2008 and older, and `0x05` is a non-standard start value found on some GM and VW sensors. Learn mode tries all three.
 
 **Is the firmware open source?**
 Yes — STM32F042G4 firmware in this repository, SENT protocol layer in [open-sent-c](https://github.com/ucandevices/open-sent-c). A USB DFU bootloader is included; `sent_viewer.py` is a free GUI client.

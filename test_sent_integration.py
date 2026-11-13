@@ -105,9 +105,10 @@ class SENTDevice:
         return self.send_line(f"t600305{lsb:02X}{msb:02X}")
 
     # ── Config frame on CAN ID 0x001 ───────────────────────────────────────
-    # Sets the RX tick range so the bridge can derive a per-tick
-    # sync-detection threshold (sync_min_us).  Without this the firmware
-    # default of 100 µs only distinguishes sync from data at ~3 µs/tick.
+    # Sets the RX tick range (and nibble count / CRC).  Optional for tick
+    # time: the firmware finds frames by structure and receives any tick
+    # from 2 to 113 µs on its default range.  crc_seed 0x85 selects the
+    # SAE J2716 legacy CRC.
 
     def send_config(
         self,
@@ -199,10 +200,9 @@ class TestSENTIntegration:
         tx.stop()
         time.sleep(0.05)
 
-        # Narrow the RX device's tick range so the bridge can recompute a
-        # tick-appropriate sync_min_us threshold.  Stock firmware defaults
-        # to a 2.5–90 µs range whose derived threshold is 100 µs — only
-        # valid for ~3 µs ticks.  Use ±30 % around the target tick.
+        # Narrow the RX device's tick range to ±30 % around the target tick.
+        # Not required for reception (frames are found by structure on the
+        # default 2–113 µs range); it tightens the sync-pulse check.
         margin = max(1.0, tick_us * 0.3)
         ack = rx.send_config(
             min_tick_us=max(0.5, tick_us - margin),

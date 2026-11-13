@@ -505,9 +505,10 @@ class SentMonitor:
         """Build and send a 0x001 config frame with the current UI parameters.
 
         Frame layout (7 bytes, DLC=7):
-          B0 : data nibbles (4 / 6 / 8)
+          B0 : data nibbles (1..8)
           B1 : CRC mode     (0=DATA_ONLY, 1=STATUS_AND_DATA)
-          B2 : CRC init seed (e.g. 0x03 / 0x05)
+          B2 : CRC selector (0x03 recommended, 0x05 GM/VW variant,
+                             0x85 SAE J2716 legacy FEB2008)
           B3 : min tick, units 0.5 µs  (= tick * 0.8 / 0.5)
           B4 : max tick, units 1 µs    (= tick * 1.5)
           B5 : output RX CAN ID, low byte  (little-endian)
@@ -785,8 +786,13 @@ class SentMonitor:
                     tick_us  = tick_x10 / 10.0
                     nib      = data[2]
                     mode_str = "STATUS_AND_DATA" if data[3] else "DATA_ONLY"
+                    crc_str = ""
+                    if dlc >= 5:
+                        # byte 4: CRC selector, same encoding as config byte 2
+                        self.param_vars["crc_init"].set(f"0x{data[4]:02X}")
+                        crc_str = "  crc=" + ("legacy" if data[4] & 0x80 else f"0x{data[4]:02X}")
                     self.learn_result_var.set(
-                        f"tick={tick_us:.1f}us  nibbles={nib}  {mode_str}")
+                        f"tick={tick_us:.1f}us  nibbles={nib}  {mode_str}{crc_str}")
                     # Push learned values into param fields
                     self.param_vars["tick_us"].set(str(tick_us))
                     self.param_vars["nibbles"].set(str(nib))
@@ -813,14 +819,31 @@ class SentMonitor:
         except ValueError:
             return
 
-        # Unpack nibbles (high then low from each byte)
+        # 0x510 layout: data nibbles packed in ceil(n/2) bytes, then an info
+        # byte at index max(3, ceil(n/2)) (status nibble in bits 7..4, slow
+        # channel flags in bits 2..0), optionally followed by slow-channel
+        # ID and 16-bit data.  Older firmware sent the data bytes only.
+        try:
+            n_cfg = int(self.param_vars["nibbles"].get())
+        except ValueError:
+            n_cfg = 6
+        n_bytes = (n_cfg + 1) // 2
+        info_idx = max(3, n_bytes)
         nibbles = []
-        for b in data:
+        for b in data[:n_bytes]:
             nibbles.append((b >> 4) & 0x0F)
             nibbles.append(b & 0x0F)
+        nibbles = nibbles[:n_cfg]
 
         data_hex     = "  ".join(f"{b:02X}" for b in data)
         nibbles_str  = "  ".join(f"{n:X}" for n in nibbles)
+        if len(data) > info_idx:
+            info = data[info_idx]
+            nibbles_str += f"   st={info >> 4:X}"
+            if (info & 0x01) and len(data) >= info_idx + 4:
+                kind = "ESM16" if info & 0x04 else ("ESM" if info & 0x02 else "SSM")
+                slow_val = data[info_idx + 2] | (data[info_idx + 3] << 8)
+                nibbles_str += f"   {kind} id={data[info_idx + 1]:02X} data={slow_val:X}"
 
         self.sv_last_data.set(data_hex)
         self.sv_last_nibbles.set(nibbles_str)
