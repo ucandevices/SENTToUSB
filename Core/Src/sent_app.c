@@ -353,11 +353,11 @@ static void dispatch_slcan_line(const char *line)
         resp = "\r";
         break;
     case SENT_SLCAN_CMD_VERSION:
-        resp = "V0101\r";
+        resp = "V0102\r";
         break;
     case SENT_SLCAN_CMD_FWVERSION:
         /* uCCBViewer calls .substring(1) on this; must not be empty */
-        resp = "v0101\r";
+        resp = "v0102\r";
         break;
     case SENT_SLCAN_CMD_SERIAL: {
         static const char hex[16] = "0123456789ABCDEF";
