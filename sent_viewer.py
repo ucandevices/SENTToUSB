@@ -22,6 +22,33 @@ import time
 import re
 from collections import deque
 from datetime import datetime
+import os
+import sys
+
+# Release this viewer belongs to (matches the GitHub release tag).
+APP_VERSION = "1.1"
+
+
+def _build_time() -> str:
+    """Build time shown in the title bar.
+
+    A packaged exe carries the time it was built (build_viewer.py writes
+    sent_viewer_build.py before running PyInstaller).  When run from source
+    there is no build, so the script's last-modified time is shown instead.
+    """
+    try:
+        from sent_viewer_build import BUILD_TIME
+        return BUILD_TIME
+    except ImportError:
+        pass
+    try:
+        mtime = os.path.getmtime(os.path.abspath(__file__))
+        return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") + " (source)"
+    except OSError:
+        return "unknown"
+
+
+APP_TITLE = f"SENT Sensor Monitor v{APP_VERSION}  -  build {_build_time()}"
 
 
 # ─── Sensor presets ───────────────────────────────────────────────────────────
@@ -83,7 +110,7 @@ class SentMonitor:
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("SENT Sensor Monitor")
+        self.root.title(APP_TITLE)
         self.root.geometry("1100x680")
         self.root.configure(bg="#1e1e2e")
 

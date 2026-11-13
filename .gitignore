@@ -21,3 +21,13 @@ $RECYCLE.BIN/
 
 # ── Large binary datasheets (optional — remove these lines to track PDFs) ────
 *.pdf
+
+# ── Firmware downloaded by flash_usb.bat ─────────────────────────────────────
+SENTToUSB_*.bin
+SENTToUSB_*.bin.part
+
+# ── sent_viewer.exe build (build_viewer.py) ──────────────────────────────────
+build/
+dist/
+sent_viewer_build.py
+*.spec
