@@ -502,3 +502,8 @@ hardware stays private.
   Windows (now spins for the last 20 ms). TX at 3 µs × 6 nibbles went from 16 to ~710 frames/s, period
   1.36 ms on the wire. The emulator returns bytes at once, so the tests never showed it. New
   `selftest --direction both|a-to-b|b-to-a` (MCP `direction`) for a single wire.
+- Viewer on the same two boards (two windows, B TX → A RX): one-shot, periodic and 50 µs × 3 nibble frames
+  received correctly, no CRC/sync errors. Periodic TX ran from Tk `after()` and drifted (10 ms set → ~20 ms
+  on the wire, gaps up to 51 ms while the table updated); it now runs in its own thread against fixed
+  deadlines: 10.0 ms and 50.0 ms measured on the analyzer. Serial reads no longer wait for the 100 ms
+  timeout. The Frames column is the firmware's counter since power-up, not since connecting.

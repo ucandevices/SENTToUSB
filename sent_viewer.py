@@ -206,6 +206,8 @@ class Channel:
         self.learning = False
         self.tx_active = False
         self.tx_after = None
+        self.tx_thread = None
+        self.tx_plan = (None, 0.1, 0.002)   # periodic TX: frame, period s, frame s (UI -> worker)
         self.reset_stats()
 
     def reset_stats(self):
@@ -242,6 +244,7 @@ class SentMonitor:
         self.running = False
         self.paused  = False
         self.rx_queue: queue.Queue[str] = queue.Queue()
+        self._write_lock = threading.Lock()   # UI and periodic-TX thread share the port
 
         self.channels = [Channel(i) for i in range(MAX_CHANNELS)]
         self.n_ch = 1                  # channels on the connected device
@@ -818,7 +821,8 @@ class SentMonitor:
         if not self._connected():
             return
         try:
-            self.serial_port.write(data)
+            with self._write_lock:          # the periodic TX thread writes too
+                self.serial_port.write(data)
         except Exception:
             return   # the rx thread reports the lost port
         if log:
@@ -1029,21 +1033,53 @@ class SentMonitor:
         ch.mode = "TX"
         self.tx_toggle_btn.config(text="Stop")
         self._send_ctrl(ch, CMD_TX)
-        self._tx_tick(ch)
+        self._tx_refresh(ch)
+        ch.tx_thread = threading.Thread(target=self._tx_worker, args=(ch,), daemon=True,
+                                        name=f"tx-{ch.name}")
+        ch.tx_thread.start()
 
-    def _tx_tick(self, ch: Channel):
+    def _tx_refresh(self, ch: Channel):
+        """UI thread: copy the TX frame and timing from the Tk fields for the
+        worker (Tk variables must not be read from another thread); repeats
+        every 200 ms so edits take effect while TX runs."""
         if not ch.tx_active:
             return
-        if self._connected():
-            frame = self._tx_build_frame(ch)
-            if frame:
-                self._send(frame)
         try:
             period = max(10, int(ch.tx_period.get()))
         except (ValueError, TypeError):
             period = 100
-        period = max(period, int(self._tx_frame_ms(ch)) + 2)    # slow ticks: frame > 10 ms
-        ch.tx_after = self.root.after(period, lambda: self._tx_tick(ch))
+        frame_s = (self._tx_frame_ms(ch) + 0.5) / 1000.0
+        ch.tx_plan = (self._tx_build_frame(ch), max(period / 1000.0, frame_s + 0.002), frame_s)
+        ch.tx_after = self.root.after(200, lambda: self._tx_refresh(ch))
+
+    def _tx_worker(self, ch: Channel):
+        """Periodic TX in its own thread: Tk timers fire up to ~16 ms late and
+        the event loop stalls while the table updates, so a 10 ms period from
+        root.after() came out at ~20 ms.  Each frame goes out at a fixed
+        deadline (a late one is caught up), never closer than one frame after
+        the previous one (the firmware NACKs that)."""
+        nxt = time.perf_counter()
+        last = None
+        while ch.tx_active and self._connected():
+            frame, period_s, frame_s = ch.tx_plan
+            now = time.perf_counter()
+            if frame:
+                with self._write_lock:
+                    try:
+                        self.serial_port.write(frame)
+                    except Exception:
+                        return                      # the rx thread reports the lost port
+                last = now
+            nxt += period_s
+            if nxt < now - period_s:                # far behind: restart the schedule
+                nxt = now + period_s
+            if last is not None:
+                nxt = max(nxt, last + frame_s)
+            while ch.tx_active:                     # Windows sleeps in ~1-16 ms steps:
+                left = nxt - time.perf_counter()    # sleep most of the way, spin the rest
+                if left <= 0:
+                    break
+                time.sleep(left - 0.02 if left > 0.02 else 0)
 
     def _tx_stop(self, ch: Channel, resume: bool = True):
         """Stop periodic TX on a channel; resume=True switches it back to RX."""
@@ -1052,6 +1088,9 @@ class SentMonitor:
         if ch.tx_after is not None:
             self.root.after_cancel(ch.tx_after)
             ch.tx_after = None
+        if ch.tx_thread is not None:
+            ch.tx_thread.join(timeout=0.5)          # no frame after the RX command
+            ch.tx_thread = None
         if ch is self.sel:
             self.tx_toggle_btn.config(text="Start")
         if was_active and resume and self._connected():
@@ -1095,7 +1134,11 @@ class SentMonitor:
         buf = b""
         while self.running:
             try:
-                chunk = self.serial_port.read(256)
+                # read(n) would wait for n bytes or the 100 ms timeout: take one
+                # byte, then whatever else has arrived.
+                chunk = self.serial_port.read(1)
+                if chunk and self.serial_port.in_waiting:
+                    chunk += self.serial_port.read(self.serial_port.in_waiting)
             except Exception:
                 if self.running:
                     self.rx_queue.put(DISCONNECTED)
