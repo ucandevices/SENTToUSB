@@ -25,8 +25,9 @@ using the CLI or the MCP server, and the other way round.
 ## Install
 
 ```
-pip install "sentusb[mcp] @ git+https://github.com/ucandevices/SENTToUSB"   # from GitHub
-pip install -e ".[mcp]"                                                     # from a clone (repo root)
+pip install sentusb                  # library and CLI (from PyPI)
+pip install "sentusb[mcp]"           # plus the MCP server
+pip install -e ".[mcp]"              # from a clone (repo root)
 ```
 
 Both put `sentusb` and `sentusb-mcp` on PATH; drop `[mcp]` if you only need the library and CLI. Without
@@ -176,9 +177,10 @@ The tests check:
 - **CLI:** commands and exit codes.
 - **MCP:** in-memory client, and a real stdio session.
 
-**Not tested on hardware yet.** First hardware test: two 1-channel SENTToUSB boards wired together,
-`sentusb -p COMa selftest --peer COMb`. On the first rev 3 board, run `sentusb selftest` with the loopback
-wiring.
+**Hardware:** tested on two 1-channel SENTToUSB boards (firmware V0102) wired B TX → A RX, with a logic
+analyzer on the line: `selftest --peer --direction b-to-a` passes all 6 formats, TX holds a 1.36 ms period
+at 3 µs × 6 nibbles. The 4-channel board is tested against the emulator only so far; on the first rev 3
+board, run `sentusb selftest` with the loopback wiring.
 
 ## Version history
 
@@ -186,5 +188,5 @@ wiring.
 |---|---|
 | viewer 1.1 | 1 channel (SENTToUSB). |
 | viewer 2.0 | 1 or 4 channels detected from the device; per-channel parameters, learn and TX; *Channels* overview; termination and listen-only; supply bar; channel filter and `channel` column in CSV; COM port pre-selected by USB ID; reports an unplugged device. |
-| sentusb 0.1.0 | Library, CLI, MCP server, emulator, self-test. |
-| sentusb 0.1.0 (unreleased) | Two-board self-test (`--peer`, `peer_port`) and emulator wire (`?wire=`). TX pacing: no early frame after a late wake-up, one retry of a rejected frame (frames of 12.5 µs × 8 nibbles and 50 µs were rejected before). Viewer: TX period and the one-shot RX switch-back are at least one frame long. Serial answers no longer wait 50 ms and short TX waits no longer sleep 8–15 ms on Windows (TX rate up from ~16 to ~710 frames/s at 3 µs). Selftest `--direction`. |
+| sentusb 0.1.0 | First PyPI release. Library, CLI, MCP server, emulator, self-test, including the two-board self-test (`--peer`, `--direction`, MCP `peer_port`) and emulator wire (`?wire=`). Tested on two 1-channel boards. Serial answers arrive without the 50 ms read-timeout delay, and TX pacing holds sub-ms timing on Windows (~710 frames/s at 3 µs); no early frame after a late wake-up, one retry of a rejected frame. |
+| viewer 2.0 (later builds) | TX period and one-shot RX switch-back at least one frame long; periodic TX in its own thread (10 ms set = 10.0 ms on the wire). |

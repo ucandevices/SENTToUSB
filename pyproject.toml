@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,25 @@ version = "0.1.0"
 description = "Library, CLI and MCP server for the ucandevices SENT-to-USB converters (1 and 4 channels)"
 readme = "sentusb/README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["sentusb/LICENSE"]
+authors = [{ name = "ucandevices" }]
+keywords = ["SENT", "SAE J2716", "automotive", "sensor", "USB", "SLCAN", "MCP"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Manufacturing",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
 dependencies = ["pyserial>=3.5"]
+
+[project.urls]
+Homepage = "https://github.com/ucandevices/SENTToUSB"
+Source = "https://github.com/ucandevices/SENTToUSB"
+Issues = "https://github.com/ucandevices/SENTToUSB/issues"
 
 [project.optional-dependencies]
 mcp = ["mcp>=2.2,<3"]
