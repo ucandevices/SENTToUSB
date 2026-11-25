@@ -31,3 +31,14 @@ build/
 dist/
 sent_viewer_build.py
 *.spec
+
+# ── 4-channel (STM32C071) build: build_c071.sh ───────────────────────────────
+Debug_C071/
+
+# ── Python packaging / tests (sentusb) ──────────────────────────────────────
+*.egg-info/
+.pytest_cache/
+
+# ── Host test build output (C071/Tests, C071 library Tests)
+C071/Tests/build/
+C071/Core/Inc/sent/implementation/Tests/build/

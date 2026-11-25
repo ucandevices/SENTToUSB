@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentusb"
+version = "0.1.0"
+description = "Library, CLI and MCP server for the ucandevices SENT-to-USB converters (1 and 4 channels)"
+readme = "sentusb/README.md"
+requires-python = ">=3.10"
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=2.2,<3"]
+test = ["pytest>=8", "mcp>=2.2,<3"]
+
+[project.scripts]
+sentusb = "sentusb.cli:main"
+sentusb-mcp = "sentusb.mcp_server:main"
+
+[tool.setuptools]
+packages = ["sentusb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

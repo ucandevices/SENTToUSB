@@ -12,6 +12,8 @@
 
 USB CDC (Virtual COM Port) adapter for **SAE J2716 / ISO 21097 SENT** sensors. Decodes frames with 1 to 8 data nibbles at any tick time from 2 to 113 µs, with or without pause pulse, with both `DATA_ONLY` and `STATUS_AND_DATA` CRC modes, supports the SAE J2716 recommended CRC (`0x03`), the J2716 legacy CRC (FEB2008) and the `0x05` variant used by some GM / VW sensors, decodes Short and Enhanced serial messages, and includes a TX mode for synthesizing SENT frames to bench-test ECUs. Talks to the host using the **SLCAN** text protocol over any serial terminal. SENT protocol implementation: [open-sent-c](https://github.com/ucandevices/open-sent-c).
 
+**4-channel version (in development):** a separate firmware for a 4-channel board with an STM32C071 lives in `C071/` (`build_c071.sh`). It reads or emulates up to four SENT channels at once and adds per-channel termination switching and sensor-supply measurement. Channel 1 uses exactly the 1-channel frame IDs, so existing tools keep working. The 1-channel firmware described below is not affected by it. Not yet tested on hardware; see [CHANGES_4CH.md](CHANGES_4CH.md).
+
 A commercial SENT analyzer from an automotive tool vendor typically costs hundreds to thousands of euros. This one is around **$23** on [Tindie](https://www.tindie.com/products/lll7/sent-j2716-usb-converter/).
 
 ## Where to buy
@@ -33,6 +35,8 @@ A commercial SENT analyzer from an automotive tool vendor typically costs hundre
 | **PA2** | SENT **RX** — TIM2 CH3 input capture, internal pull-up |
 | **PB0** | SENT **TX** — TIM3 CH3 output compare (toggle, AF1), DMA-driven |
 | USB | Full-speed CDC (Virtual COM Port, no driver needed on Win10+) |
+
+The 4-channel board (STM32C071K8T6) pin map is in [`C071/Core/Inc/main.h`](C071/Core/Inc/main.h) and the TX/RX timer table in [`C071/Core/Src/sent_app_c071.c`](C071/Core/Src/sent_app_c071.c).
 
 ---
 
@@ -177,7 +181,8 @@ messages are checked with the same CRC variant as the frame.
 
 | Script | Purpose |
 |--------|---------|
-| `sent_viewer.py` | General SLCAN monitor GUI with TX panel and Learn mode |
+| `sent_viewer.py` | SLCAN monitor GUI with TX panel and Learn mode; detects 1 or 4 channels |
+| [`sentusb/`](sentusb/README.md) | Python library, `sentusb` CLI and MCP server (for AI agents), both boards; includes an emulator and a board self-test |
 | `mlx_viewer.py` | MLX90377-specific GUI: angle dial + live history plot of angle & magnetic field |
 | `sent_test.py` | CLI — open port, apply config, print received frames for N seconds |
 | `check_rx.py` | Loopback sanity check: pings COM8 (TX), listens on COM9 (RX) |
@@ -211,6 +216,11 @@ dongles** against each other to verify the full TX → wire → RX loop.
 - Quiet-channel listen (no TX driver)
 - Per-tick persistence across multiple frames
 
+The same wiring (both directions: PB0 of each dongle to PA2 of the other) also runs the
+`sentusb` self-test: `sentusb -p COM15 selftest --peer COM20`. It checks both
+dongles, then sends frames A→B and B→A in 6 formats (3–50 µs ticks, 3–8 nibbles, both CRC
+modes and the legacy CRC) and fails if any frame is lost or changed.
+
 Each tick test first sends a `0x001` config frame to the RX device to
 narrow its tick range around the tick under test. This is optional with
 current firmware, which receives any tick time on its default range.
@@ -243,7 +253,14 @@ guide.
 
 ## Build
 
-STM32CubeIDE manages the Makefile.  To build from the command line, set the paths to the bundled tools and run make inside the `Debug` folder:
+From Git Bash with the CubeIDE toolchain on `PATH`:
+
+```bash
+./build.sh        # 1 channel, STM32F042  -> Debug/SENTToUSB.elf
+./build_c071.sh   # 4 channels, STM32C071 -> Debug_C071/SENTToUSB_4CH_C071.elf / .bin / .hex
+```
+
+The STM32CubeIDE project builds the 1-channel firmware. To build it from the command line, set the paths to the bundled tools and run make inside the `Debug` folder:
 
 ```bat
 set MAKE=C:\ST\STM32CubeIDE_1.19.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.externaltools.make.win32_2.2.0.202409170845\tools\bin\make.exe
@@ -254,6 +271,8 @@ cd Debug
 ```
 
 Output: `Debug/SENTToUSB.elf` (~28 KB flash, ~6 KB RAM on STM32F042G4 with 32 KB flash / 6 KB SRAM).
+
+Host tests (gcc, e.g. in WSL): `make run` in `Core/Inc/sent/implementation/Tests` (SENT library). For the 4-channel firmware: `make run` in `C071/Tests` (application) and `C071/Core/Inc/sent/implementation/Tests` (its library copy). `python -m pytest` for `sentusb`.
 
 ---
 
@@ -266,6 +285,8 @@ set CLI=C:\ST\STM32CubeIDE_1.19.0\STM32CubeIDE\plugins\com.st.stm32cube.ide.mcu.
 ```
 
 ### USB DFU (no ST-Link required)
+
+`flash_usb.bat` does the whole sequence with STM32CubeProgrammer: it downloads the newest release (or uses a local build), sends `boot` with `--port COMx`, and refuses to flash firmware for the other board type (chip ID check). Use `flash_usb.bat --4ch` for the 4-channel board. Manual steps:
 
 **Step 1** — trigger DFU from the running device (replace `COM8` with your port):
 ```

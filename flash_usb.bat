@@ -2,10 +2,21 @@
 setlocal EnableDelayedExpansion
 
 REM ---------------------------------------------------------------
-REM  Flash SENT-USB-Converter (STM32F042G6) over USB DFU
-REM  using STM32CubeProgrammer CLI.
+REM  Flash SENT-USB-Converter over USB DFU using STM32CubeProgrammer CLI.
+REM    1-channel board : STM32F042G6 (default)
+REM    4-channel board : STM32C071K8 (--4ch)
 REM
-REM  Usage:  flash_usb.bat [--loop] [--port COMx] [firmware.bin] [flash_address]
+REM  Usage:  flash_usb.bat [--4ch] [--loop] [--port COMx] [firmware.bin] [flash_address]
+REM
+REM  --4ch : 4-channel board. Default firmware is then SENT4CH_<tag>.bin
+REM          (asset SENTToUSB_4CH.bin of the newest release, if there is
+REM          one), else the newest SENT4CH_*.bin next to this script, else
+REM          the local build Debug_C071\SENTToUSB_4CH_C071.bin.
+REM
+REM  Before writing, the chip ID read over DFU is compared with the board
+REM  type (0x445 = F042, 0x493 = C071); a mismatch is refused. This matters
+REM  on the C071: its firmware disables the BOOT0 pin, so a wrong image
+REM  could only be recovered over SWD.
 REM
 REM  Default firmware: the newest release, downloaded from
 REM    https://github.com/ucandevices/SENTToUSB/releases/latest
@@ -26,7 +37,7 @@ REM           for the next one. Stop with Ctrl+C.
 REM
 REM  The board must be in DFU mode (system bootloader): a blank board
 REM  starts in DFU by itself; a running converter enters it when it
-REM  receives "boot<CR>" on its COM port (see --port); or hold BOOT0
+REM  receives "boot<CR>" on its COM port (see --port); or (F042 only) hold BOOT0
 REM  high while resetting / re-plugging the USB cable.
 REM
 REM  If the chip reports Read Out Protection, the script removes it
@@ -44,7 +55,23 @@ set "ASSET=SENTToUSB.bin"
 
 set "LOOP="
 set "COMPORT="
+REM  board type: 1-channel F042 unless --4ch
+set "BOARD_NAME=1-channel STM32F042"
+set "CHIP_ID=445"
+set "PREFIX=SENTToUSB_"
+set "LOCAL_BUILD=%~dp0Debug\SENTToUSB.bin"
+set "BOOT_HINT=hold BOOT0 high - pull to 3V3 - while resetting or re-plugging USB"
 :parse_opts
+if /i "%~1"=="--4ch" (
+    set "BOARD_NAME=4-channel STM32C071"
+    set "CHIP_ID=493"
+    set "ASSET=SENTToUSB_4CH.bin"
+    set "PREFIX=SENT4CH_"
+    set "LOCAL_BUILD=%~dp0Debug_C071\SENTToUSB_4CH_C071.bin"
+    set "BOOT_HINT=the C071 ignores BOOT0: a blank chip starts in DFU by itself, otherwise reflash over SWD"
+    shift
+    goto :parse_opts
+)
 if /i "%~1"=="--loop" (
     set "LOOP=1"
     shift
@@ -69,13 +96,13 @@ if not exist "%PROG%" (
 
 if "%FW%"=="" call :get_latest
 if "%FW%"=="" (
-    REM downloaded files are SENTToUSB_<tag>.bin; the last one by date is the newest
-    for /f "delims=" %%F in ('dir /b /od "%~dp0SENTToUSB_*.bin" 2^>nul') do set "FW=%~dp0%%F"
+    REM downloaded files are <PREFIX><tag>.bin; the last one by date is the newest
+    for /f "delims=" %%F in ('dir /b /od "%~dp0%PREFIX%*.bin" 2^>nul') do set "FW=%~dp0%%F"
 )
-if "%FW%"=="" if exist "%~dp0Debug\SENTToUSB.bin" set "FW=%~dp0Debug\SENTToUSB.bin"
+if "%FW%"=="" if exist "%LOCAL_BUILD%" set "FW=%LOCAL_BUILD%"
 if "%FW%"=="" (
-    echo [ERROR] No firmware: download failed, no SENTToUSB_*.bin next to this
-    echo         script and no local build in Debug\SENTToUSB.bin.
+    echo [ERROR] No firmware: download failed, no %PREFIX%*.bin next to this
+    echo         script and no local build in %LOCAL_BUILD%.
     goto :fail
 )
 if not exist "%FW%" (
@@ -85,6 +112,7 @@ if not exist "%FW%" (
 
 echo.
 echo === STM32 USB DFU flash ===
+echo Board      : %BOARD_NAME%
 echo Programmer : %PROG%
 echo Firmware   : %FW%
 echo Address    : %ADDR%
@@ -104,10 +132,8 @@ if errorlevel 1 (
     echo.
     echo [ERROR] No STM32 device found in DFU mode.
     echo         Put the board in bootloader mode: send "boot" + CR to its
-    echo         COM port ^(flash_usb.bat --port COMx^), or:
-    echo           - hold BOOT0 high ^(pull to 3V3^)
-    echo           - reset or re-plug the USB cable
-    echo           - release BOOT0
+    echo         COM port ^(flash_usb.bat --port COMx^), or
+    echo         !BOOT_HINT!.
     goto :fail
 )
 
@@ -124,7 +150,7 @@ pause
 call :find_port 30
 if errorlevel 1 (
     echo [ERROR] Device did not come back in DFU mode.
-    echo         Hold BOOT0 high, re-plug USB and run this script again.
+    echo         !BOOT_HINT!, then run this script again.
     goto :fail
 )
 
@@ -217,7 +243,7 @@ set "PS_GET=$ErrorActionPreference='Stop'; [Net.ServicePointManager]::SecurityPr
 set "PS_GET=!PS_GET! $r=Invoke-RestMethod 'https://api.github.com/repos/%REPO%/releases/latest' -Headers @{'User-Agent'='flash_usb'};"
 set "PS_GET=!PS_GET! $a=$r.assets | Where-Object { $_.name -eq '%ASSET%' } | Select-Object -First 1;"
 set "PS_GET=!PS_GET! if (-not $a) { throw 'release ' + $r.tag_name + ' has no %ASSET%' };"
-set "PS_GET=!PS_GET! $o=Join-Path '%~dp0' ('SENTToUSB_' + $r.tag_name + '.bin');"
+set "PS_GET=!PS_GET! $o=Join-Path '%~dp0' ('%PREFIX%' + $r.tag_name + '.bin');"
 set "PS_GET=!PS_GET! $h={ 'sha256:' + (Get-FileHash $o -Algorithm SHA256).Hash.ToLower() };"
 set "PS_GET=!PS_GET! if ((Test-Path $o) -and $a.digest -and ($a.digest -ne (& $h))) { Remove-Item $o };"
 set "PS_GET=!PS_GET! if (-not (Test-Path $o)) { Invoke-WebRequest $a.browser_download_url -OutFile ($o + '.part') -UseBasicParsing; Move-Item -Force ($o + '.part') $o };"
@@ -301,6 +327,8 @@ REM  :program  - write + verify + start the firmware, output is shown
 REM  and kept in %LOG% so the caller can look for RDP errors.
 REM ---------------------------------------------------------------
 :program
+call :check_chip
+if errorlevel 1 exit /b 1
 echo.
 echo --- Programming on port !PORT! ---
 REM  -g <addr> jumps to the application; DFU has no -rst (SWD/JTAG only)
@@ -314,6 +342,29 @@ if not errorlevel 1 exit /b 1
 findstr /i /c:"Download verified successfully" "%LOG%" >nul
 if errorlevel 1 exit /b 1
 exit /b 0
+
+
+REM ---------------------------------------------------------------
+REM  :check_chip  - connect only and compare the chip ID with the board
+REM  type (CHIP_ID). errorlevel 1 on a mismatch. If the CLI output has
+REM  no "Device ID" line the check is skipped with a warning.
+REM ---------------------------------------------------------------
+:check_chip
+"%PROG%" -c port=!PORT! > "%LOG%" 2>&1
+findstr /i /c:"Device ID" "%LOG%" >nul
+if errorlevel 1 (
+    echo     [WARN] Could not read the chip ID - board type not checked.
+    exit /b 0
+)
+findstr /i /r /c:"Device ID *: *0x0*%CHIP_ID%" "%LOG%" >nul
+if not errorlevel 1 exit /b 0
+echo.
+findstr /i /c:"Device ID" /c:"Device name" "%LOG%"
+echo [ERROR] This chip is not a %BOARD_NAME% ^(expected ID 0x%CHIP_ID%^).
+echo         Wrong firmware for this board - nothing written.
+if "%CHIP_ID%"=="445" echo         For the 4-channel board run: flash_usb.bat --4ch
+if "%CHIP_ID%"=="493" echo         For the 1-channel board run flash_usb.bat without --4ch.
+exit /b 1
 
 
 REM ---------------------------------------------------------------
@@ -341,7 +392,7 @@ echo.
 echo ---------------------------------------------------------------
 echo  Now UNPLUG the USB cable, wait 2 s and plug it back in.
 echo  ^(The flash is empty now, so the board should start in DFU
-echo   mode by itself; if it does not, hold BOOT0 high while plugging.^)
+echo   mode by itself; if it does not: !BOOT_HINT!.^)
 echo ---------------------------------------------------------------
 exit /b 0
 
